@@ -17,6 +17,14 @@
 using namespace Core;
 
 
+// Sponge (row 14): static data member of Vm_space, declared inline in
+// vm_space.h. We define it here so the linker finds exactly one storage
+// across the genode/base-sel4 translation units that include vm_space.h.
+// The `inline` keyword on the declaration in the header makes this
+// multiple-definition pattern legal.
+Cnode *Vm_space::_high_phys_cnode_ptr = nullptr;
+
+
 long Vm_space::_map_page(Cap_sel  const &idx,
                          addr_t   const virt,
                          Map_attr const map_attr,

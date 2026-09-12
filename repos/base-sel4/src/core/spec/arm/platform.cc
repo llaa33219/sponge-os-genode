@@ -40,6 +40,19 @@ seL4_Word Untyped_memory::smallest_page_type() {
 	return seL4_ARM_SmallPageObject; }
 
 
+/*
+ * Sponge: ARM keeps page-sized child-PD CNodes (CSPACE geometry is
+ * upstream on non-x86_64), so the large-backing path is never taken and
+ * the default 4 KiB allocator is returned unchanged. Defined so the
+ * cnode_backing_alloc symbol resolves on ARM.
+ */
+Range_allocator &Untyped_memory::cnode_backing_alloc(uint8_t,
+                                                     Range_allocator &default_alloc)
+{
+	return default_alloc;
+}
+
+
 void Platform::init_sel4_ipc_buffer()
 {
 	/*

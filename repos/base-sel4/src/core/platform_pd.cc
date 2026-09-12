@@ -46,6 +46,11 @@ struct Pd_id_alloc : Platform_pd::Pd_id_allocator
 		ASSERT (ok);
 		ok = _reserve(Core_cspace::TOP_CNODE_PHYS_IDX     , 1); /* 0x7ff */
 		ASSERT (ok);
+		/* Sponge (row 14 v2): keep the high-phys CNode slot out of the
+		 * allocatable pool — an unreserved 0x7e0 gets handed to a
+		 * vm_space leaf CNode, clobbering the high-phys cap. */
+		ok = _reserve(Core_cspace::TOP_CNODE_HIGH_PHYS_IDX, 1); /* 0x7e0 */
+		ASSERT (ok);
 	}
 };
 

@@ -150,6 +150,23 @@ class Core::Platform : public Platform_generic
 		                    Cnode_index(Core_cspace::phys_cnode_sel()),
 		                    Core_cspace::NUM_PHYS_SEL_LOG2, _initial_untyped_pool };
 
+		/*
+		 * Sponge (row 14 v2): a second CNode for page-frame caps whose
+		 * physical addresses live above the low phys CNode's 8 GiB
+		 * ceiling (NUM_HIGH_PHYS_SEL_LOG2 = 14 → 512 KiB backing).
+		 * Constructed EARLY alongside the other static CNodes: creating
+		 * it lazily (on first high-phys IO_MEM) failed on the 17ZD90N
+		 * because the initial-thread-CNode slot resolution for
+		 * high_phys_cnode_sel() no longer succeeds at that late point
+		 * ("Destination node offset too large"), while the early path
+		 * used by the other static CNodes works. See core_cspace.h and
+		 * docs/11-environment.md row 14.
+		 */
+		Cnode _high_phys_cnode { Cap_sel(seL4_CapInitThreadCNode),
+		                         Cnode_index(Core_cspace::high_phys_cnode_sel()),
+		                         Core_cspace::NUM_HIGH_PHYS_SEL_LOG2,
+		                         _initial_untyped_pool };
+
 		/* allocate 2nd-level CNode for storing cap selectors for untyped 4k objects */
 		Cnode _untyped_cnode { Cap_sel(seL4_CapInitThreadCNode),
 		                       Cnode_index(Core_cspace::untyped_cnode_4k()),
@@ -281,6 +298,27 @@ class Core::Platform : public Platform_generic
 		Cnode &phys_cnode() { return _phys_cnode; }
 		Cnode &top_cnode()  { return _top_cnode; }
 		Cnode &core_cnode() { return _core_cnode; }
+
+		/*
+		 * Sponge (row 14 v2): the high-phys CNode is constructed as a
+		 * static member (see the declaration above), so it always
+		 * exists. The accessors stay for API compatibility.
+		 */
+		Cnode *high_phys_cnode() { return &_high_phys_cnode; }
+		bool   high_phys_cnode_constructed() const { return _high_phys_cnode.constructed(); }
+
+		/*
+		 * Lazy construction of the high-phys CNode. Allocates 512 KiB
+		 * of backing from the 16 KiB untyped pool (NUM_HIGH_PHYS_SEL_LOG2
+		 * = 14 → 2^19-byte backing, split into 16 KiB chunks) and
+		 * inserts the CNode cap at top slot TOP_CNODE_HIGH_PHYS_IDX
+		 * (0x7e0). Returns false if the 16 KiB pool has no contiguous
+		 * 512 KiB region; the caller logs and returns an error to the
+		 * IO_MEM session (the IO_MEM will fail with "not available"
+		 * rather than crash core). See core_cspace.h + docs/11
+		 * row 14.
+		 */
+		bool   construct_high_phys_cnode();
 
 		Vm_space &core_vm_space() { return _core_vm_space; }
 

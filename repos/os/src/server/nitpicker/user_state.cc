@@ -111,7 +111,19 @@ void User_state::_handle_input_event(Input::Event ev)
 				[&] (Point orig_pos) {
 					Point const p = orig_pos + Point { x, y };
 					ev = Absolute_motion { p.x, p.y }; },
-				[&] (Nowhere) { }); });
+				[&] (Nowhere) {
+					/*
+					 * First relative motion before any absolute position
+					 * was established (the common case on PS/2-only
+					 * machines, where no absolute-motion event ever
+					 * arrives): start from the origin instead of dropping
+					 * the event. The sanitizer in the absolute-motion
+					 * handler below clamps the result into the visible
+					 * area, so the pointer materializes on the first
+					 * mouse movement and tracks from there.
+					 */
+					Point const p = Point { 0, 0 } + Point { x, y };
+					ev = Absolute_motion { p.x, p.y }; }); });
 
 	/* respond to motion events by updating the pointer position */
 	ev.handle_absolute_motion([&] (int x, int y) {
