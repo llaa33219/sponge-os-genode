@@ -133,7 +133,16 @@ void Platform::_init_core_page_table_registry()
 		 * geometry and pinned at 64/PD.
 		 */
 		SECOND_LEVEL_CNODES_PER_PD = 64,
-		MAX_VM_LEAF_COUNT = 2048,
+		/*
+		 * Sponge (26.08): 2048 -> 3072 aggregate vm leaves. The 26.08
+		 * binaries (larger core/libc/Qt mapping sets across the alpha
+		 * topology's ~30 PDs) exceeded the 2048 budget — surfacing as
+		 * "Cnode construction failed" (the silent pool-exhaustion path
+		 * of the Cnode ctor) during child spawn. +16 MiB keeps the
+		 * total carve at ~112 MiB, below the 128 MiB eager-carve
+		 * regression point documented above.
+		 */
+		MAX_VM_LEAF_COUNT = 3072,
 		/*
 		 * Sponge (row 14): NO eager reservation for the high-phys
 		 * CNode backing (2^23 slots x 32 B CTE = 256 MiB). The CNode
