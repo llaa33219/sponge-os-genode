@@ -4,7 +4,11 @@ DOWNLOADS := sel4.git
 
 URL(sel4) := https://github.com/seL4/seL4.git
 # master branch, version 13.0.0
-REV(sel4) := cd6d3b8c25d49be2b100b0608cf0613483a6fffa
+# Sponge OS: bumped from upstream 26.08's pin (13.0.0, cd6d3b8c) to
+# 16.0.0 — upstream fixed the init_freemem reserved-subtraction leak
+# (4018ad594) and added mb2 unaddressable-memory handling. Genode's
+# base-sel4 patches were rebased for 16.0.0; see docs/11 ledger.
+REV(sel4) := 6e7c3b733d296cfd88d5fbf635c96e447a882374
 DIR(sel4) := src/kernel/sel4
 
 $(call check_tool,cmake)

@@ -43,9 +43,13 @@ long Vm_space::_map_page(Cap_sel  const &idx,
 	if (map_attr.write_combined)
 		attr = seL4_X86_WriteCombining;
 
-	if (ept)
-		return seL4_X86_Page_MapEPT(service, pd, virt, rights, attr);
-	else
+	if (ept) {
+		/* Sponge (seL4 16.0.0): EPT attribute type was split from the
+		 * regular VM attributes — cast the bit-identical value. */
+		seL4_X86_EPT_VMAttributes const ept_attr =
+			(seL4_X86_EPT_VMAttributes)attr;
+		return seL4_X86_Page_MapEPT(service, pd, virt, rights, ept_attr);
+	} else
 		return seL4_X86_Page_Map(service, pd, virt, rights, attr);
 }
 
@@ -99,15 +103,18 @@ static long map_page_table(Cap_sel const pagetable,
                            Cap_sel const vroot,
                            addr_t  const virt)
 {
+	/* Sponge (seL4 16.0.0): EPT attribute type split — see _map_page. */
 	return seL4_X86_EPTPT_Map(pagetable.value(), vroot.value(), virt,
+	                          (seL4_X86_EPT_VMAttributes)
 	                          seL4_X86_Default_VMAttributes);
 }
 
 static long map_pdpt(Cap_sel const pdpt,
                      Cap_sel const vroot,
-                     addr_t  const virt)
+                     addr_t const virt)
 {
 	return seL4_X86_EPTPDPT_Map(pdpt.value(), vroot.value(), virt,
+	                            (seL4_X86_EPT_VMAttributes)
 	                            seL4_X86_Default_VMAttributes);
 }
 
@@ -116,6 +123,7 @@ static long map_directory(Cap_sel const pd,
                           addr_t  const virt)
 {
 	return seL4_X86_EPTPD_Map(pd.value(), vroot.value(), virt,
+	                          (seL4_X86_EPT_VMAttributes)
 	                          seL4_X86_Default_VMAttributes);
 }
 
