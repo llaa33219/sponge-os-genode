@@ -16,6 +16,8 @@
 
 /* Genode includes */
 #include <base/exception.h>
+#include <base/internal/crt0.h>
+#include <util/string.h>
 
 /* core includes */
 #include <types.h>
@@ -23,6 +25,8 @@
 
 /* seL4 includes */
 #include <sel4/sel4.h>
+#include <sel4/bootinfo.h>
+#include <interfaces/sel4_client.h>
 
 namespace Core { class Initial_untyped_pool; }
 
@@ -37,6 +41,183 @@ class Core::Initial_untyped_pool
 		struct Free_offset { addr_t value = 0; };
 
 		Free_offset _free_offset[MAX_UNTYPED];
+
+		/*
+		 * Sponge (row 11 → core-side migration): artifact ranges of
+		 * the seL4 kernel's init_freemem subtraction bug. The kernel
+		 * subtracts the reserved regions (kernel+userland image) from
+		 * the available regions with a pointer that advances
+		 * unconditionally per reserved entry — on fragmented maps the
+		 * later fragments are never subtracted, leak into freemem,
+		 * and surface as RAM untypeds that overlap the reserved image
+		 * or even each other. Retyping such an untyped corrupts
+		 * kernel state (the historical crash: null deref in
+		 * decodeInvocation during Untyped_Retype). The historical fix
+		 * patched the kernel (former ledger row 11,
+		 * sel4-uefi-untyped-overlap.patch); this core-side detection
+		 * replaces it: flagged ranges are leaked on purpose — never
+		 * retyped, never allocated from — keeping the seL4 kernel
+		 * pristine.
+		 */
+		bool _artifact[MAX_UNTYPED] { };
+		bool _artifacts_detected   { false };
+
+		void _detect_artifacts_once()
+		{
+			using Genode::warning;
+
+			if (_artifacts_detected)
+				return;
+
+			_artifacts_detected = true;
+
+			seL4_BootInfo const &bi = sel4_boot_info();
+			unsigned const count =
+				(unsigned)(bi.untyped.end - bi.untyped.start);
+			if (count > MAX_UNTYPED)
+				return;
+
+			/* flag every RAM untyped overlapping [base, base+size) */
+			auto flag_overlaps = [&] (addr_t base, addr_t size) {
+				for (unsigned i = 0; i < count; i++) {
+					seL4_UntypedDesc const &d = bi.untypedList[i];
+					if (d.isDevice) continue;
+					addr_t const end = d.paddr + (1UL << d.sizeBits);
+					if (base < end && d.paddr < base + size)
+						_artifact[i] = true;
+				}
+			};
+
+			/*
+			 * (1) mutual overlap among RAM untypeds — freemem
+			 * regions are disjoint by construction, any overlap is
+			 * a subtraction artifact
+			 */
+			for (unsigned i = 0; i < count; i++) {
+				seL4_UntypedDesc const &a = bi.untypedList[i];
+				if (a.isDevice) continue;
+				addr_t const a_end = a.paddr + (1UL << a.sizeBits);
+
+				for (unsigned j = i + 1; j < count; j++) {
+					seL4_UntypedDesc const &b = bi.untypedList[j];
+					if (b.isDevice) continue;
+					addr_t const b_end = b.paddr + (1UL << b.sizeBits);
+
+					if (a.paddr < b_end && b.paddr < a_end)
+						_artifact[i] = _artifact[j] = true;
+				}
+			}
+
+			/*
+			 * (2) overlap with core's own image (core + boot
+			 * modules, the full rootserver image). The physical
+			 * base is queried from the kernel: the bootinfo's
+			 * userImageFrames.start is the frame cap of the image's
+			 * first page — seL4_X86_Page_GetAddress returns its
+			 * paddr, independent of where the loader actually
+			 * placed the image (under UEFI the image is NOT loaded
+			 * at its link address). The size is the linked virtual
+			 * extent, which equals the physical extent because the
+			 * rootserver image occupies one contiguous physical
+			 * region. Fallback if the query fails: the linked
+			 * extent (correct for identity-placed boots).
+			 */
+			{
+				addr_t const img_beg_linked =
+					(addr_t)&_prog_img_beg;
+				addr_t const img_size =
+					(addr_t)&_prog_img_end - img_beg_linked;
+
+				addr_t img_beg = img_beg_linked;
+
+				seL4_X86_Page_GetAddress_t const g =
+					seL4_X86_Page_GetAddress(
+						(seL4_X86_Page)bi.userImageFrames.start);
+
+				if (g.error == seL4_NoError) {
+					img_beg = g.paddr;
+				}
+
+				flag_overlaps(img_beg, img_size);
+			}
+
+			/*
+			 * (3) overlap with firmware-reserved regions of the raw
+			 * multiboot memory map (X86_MBMMAP bootinfo chunk).
+			 * GRUB marks the image area (EfiLoaderData) as usable,
+			 * so this is a defensive net rather than the primary
+			 * detector — see (2).
+			 */
+			if (bi.extraLen) {
+
+				struct Mb_mmap_entry {
+					uint32_t size;
+					uint64_t base_addr;
+					uint64_t length;
+					uint32_t type;    /* 1 == usable RAM */
+				} __attribute__((packed));
+
+				addr_t const extra     =
+					reinterpret_cast<addr_t>(&bi) + 4096;
+				addr_t const extra_end = extra + bi.extraLen;
+
+				for (seL4_BootInfoHeader const *element =
+				     reinterpret_cast<seL4_BootInfoHeader const *>(extra),
+				     *next = nullptr;
+				     (next = reinterpret_cast<seL4_BootInfoHeader const *>(
+				         reinterpret_cast<addr_t>(element) + element->len))
+				     && next <= reinterpret_cast<seL4_BootInfoHeader const *>(extra_end)
+				     && element->id != SEL4_BOOTINFO_HEADER_PADDING;
+				     element = next)
+				{
+					if (element->id != SEL4_BOOTINFO_HEADER_X86_MBMMAP)
+						continue;
+
+					uint32_t const mmap_length =
+						*reinterpret_cast<uint32_t const *>(
+							reinterpret_cast<addr_t>(element)
+							+ sizeof(*element));
+
+					addr_t const entries_beg =
+						reinterpret_cast<addr_t>(element)
+						+ sizeof(*element) + sizeof(mmap_length);
+					addr_t const entries_end = entries_beg + mmap_length;
+
+					/* bounded by the chunk header's length, too */
+					if (entries_end >
+					    reinterpret_cast<addr_t>(element) + element->len)
+						break;
+
+					addr_t pos = entries_beg;
+					while (pos + sizeof(Mb_mmap_entry) <= entries_end) {
+
+						Mb_mmap_entry const *entry =
+							reinterpret_cast<Mb_mmap_entry const *>(pos);
+
+						/* variable-stride multiboot1 entries */
+						size_t const stride =
+							entry->size + sizeof(entry->size);
+						if (!entry->size || stride < sizeof(Mb_mmap_entry)
+						    || pos + stride > entries_end)
+							break;
+
+						if (entry->type != 1)
+							flag_overlaps((addr_t)entry->base_addr,
+							              (addr_t)entry->length);
+
+						pos += stride;
+					}
+					break; /* single MBMMAP chunk */
+				}
+			}
+
+			for (unsigned i = 0; i < count; i++)
+				if (_artifact[i])
+					warning("init_freemem artifact untyped skipped: ",
+					        Hex(bi.untypedList[i].paddr),
+					        " size ",
+					        Hex(1UL << bi.untypedList[i].sizeBits));
+		}
 
 	public:
 
@@ -121,6 +302,8 @@ class Core::Initial_untyped_pool
 		 */
 		unsigned alloc(uint8_t size_log2)
 		{
+			_detect_artifacts_once();
+
 			enum { UNKNOWN = 0 };
 			unsigned sel = UNKNOWN;
 
@@ -131,6 +314,10 @@ class Core::Initial_untyped_pool
 			for_each_range([&] (Range const &range, addr_t const, addr_t const, bool const) {
 				/* ignore device memory */
 				if (range.device)
+					return;
+
+				/* Sponge (row 11 → core): skip artifact ranges */
+				if (_artifact[range.index])
 					return;
 
 				/* calculate free index after allocation */
@@ -186,7 +373,13 @@ class Core::Initial_untyped_pool
 		                              uint8_t const size_log2 = PAGE_SIZE_LOG2,
 		                              addr_t  max_memory = 0UL - 0x1000UL)
 		{
+			_detect_artifacts_once();
+
 			for_each_range([&] (Range const &range, addr_t const /*phys*/, addr_t const /*size*/, bool const /*device*/) -> bool {
+
+				/* Sponge (row 11 → core): skip artifact ranges */
+				if (_artifact[range.index])
+					return true;
 
 				/*
 				 * The kernel limits the maximum number of kernel objects to
