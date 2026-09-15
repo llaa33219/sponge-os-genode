@@ -124,9 +124,18 @@ struct Generic
 
 struct Dmar_common : Genode::Mmio<0x4>
 {
-	struct Type : Register<0x0, 16> {
+	/*
+	 * Sponge (2026-09-14): the Intel VT-d / ACPI DMAR remapping
+	 * structures carry an 8-bit type at offset 0 and an 8-bit
+	 * length at offset 1. The previous 16-bit register layout
+	 * misread both (type became (len<<8)|type and length read
+	 * the flags byte), which made apply() below mis-advance and
+	 * hang the acpi child on firmware DMAR tables (real Intel
+	 * boards always ship one; QEMU's synthetic tables omit it).
+	 */
+	struct Type : Register<0x0, 8> {
 		enum { DRHD= 0U, RMRR = 0x1U, ATSR = 0x2U, RHSA = 0x3U }; };
-	struct Length : Register<0x2, 16> { };
+	struct Length : Register<0x1, 8> { };
 
 	Dmar_common(Byte_range_ptr const &range) : Mmio(range) { }
 };
@@ -149,12 +158,26 @@ struct Dmar_struct_header : Generic
 	void apply(FUNC const &func = [] () { } )
 	{
 		addr_t addr = dmar_entry_start();
-		while (addr < dmar_entry_end()) {
+		while (addr + 4 <= dmar_entry_end()) {
 			Dmar_common dmar({(char *)addr, dmar_entry_end() - addr});
+
+			/*
+			 * Sponge (2026-09-14): bound the walk. Firmware DMAR
+			 * content varies; a zero/short/overlong length (or any
+			 * layout the parser misreads) must neither spin forever
+			 * nor throw Mmio::Range_violation out of the acpi child
+			 * (an uncaught exception here kills the child, its report
+			 * never publishes, and every consumer — pci_decode,
+			 * platform, usb — stalls silently). Break out instead so
+			 * the report still publishes and the boot continues.
+			 */
+			addr_t const len = dmar.read<Dmar_common::Length>();
+			if (len < 4 || addr + len > dmar_entry_end())
+				break;
 
 			func(dmar);
 
-			addr = dmar.base() + dmar.read<Dmar_common::Length>();
+			addr += len;
 		}
 	}
 
@@ -709,9 +732,23 @@ class Table_wrapper
 			            head->flags & Dmar_struct_header::INTR_REMAP_MASK ?
 			                              " , IRQ remapping supported" : "");
 
-			head->apply([&] (Dmar_common const &dmar) {
-			 Genode::log("DMA remapping structure type=", dmar.read<Dmar_common::Type>());
-			});
+			/*
+			 * Sponge (2026-09-14): firmware DMAR layouts vary and the
+			 * structure walkers can throw Mmio::Range_violation on
+			 * content they misread. An uncaught exception kills the
+			 * acpi child here, its report never publishes, and every
+			 * consumer (pci_decode, platform, usb) stalls silently —
+			 * observed as a dead usb chain with any DMAR table.
+			 * DMAR info is report-only: degrade to skipping the entry
+			 * list instead of dying.
+			 */
+			try {
+				head->apply([&] (Dmar_common const &dmar) {
+				 Genode::log("DMA remapping structure type=", dmar.read<Dmar_common::Type>());
+				});
+			} catch (...) {
+				Genode::warning("DMAR entry walk failed; skipping entry list");
+			}
 
 			Dmar_entry::list()->insert(new (&alloc) Dmar_entry(head->clone(alloc)));
 
@@ -1553,12 +1590,24 @@ class Acpi_table
 						table.parse_mcfg(_heap);
 					}
 					if (table.is_dmar()) {
-						Genode::log("Found DMAR");
-
-						Dmar_struct_header const & head = table.parse_dmar(_heap);
-						_dmar_info.construct(
-							Dmar_info { (bool)(head.flags & Dmar_struct_header::INTR_REMAP_MASK),
-							            (uint8_t)(head.width + 1) });
+						/*
+						 * Sponge (2026-09-14): skip DMAR entirely.
+						 * The structure walkers (Dmar_common/
+						 * Dmar_drhd/Dmar_rmrr/Device_scope) misread
+						 * firmware DMAR layouts (16-bit type/length
+						 * registers vs the spec's 8-bit fields) and
+						 * throw Mmio::Range_violation from inside
+						 * deferred serialization lambdas, killing the
+						 * acpi child — its report then never publishes
+						 * and every consumer (pci_decode, platform,
+						 * usb) stalls silently: a dead usb chain on any
+						 * board that ships a DMAR (i.e. every real
+						 * Intel board; QEMU's synthetic tables omit it).
+						 * DMAR info is report-only — nothing in the
+						 * boot path consumes it — so skipping is safe.
+						 */
+						Genode::log("Found DMAR (skipped: parser not "
+						            "robust against firmware layouts)");
 					}
 
 					if (table.is_hpet()) {
@@ -1777,27 +1826,22 @@ void Acpi::generate_report(Genode::Env &env, Genode::Allocator &alloc,
 			});
 		}
 
-		/* lambda definition for scope evaluation in rmrr */
-		auto func_scope = [&] (Device_scope const &scope)
-		{
-			g.node("scope", [&] () {
-				g.attribute("bus_start", scope.read<Device_scope::Bus>());
-				g.attribute("id",   scope.read<Device_scope::Id>());
-				g.attribute("type", scope.read<Device_scope::Type>());
-
-				scope.for_each_path([&](auto const &path) {
-					g.node("path", [&] () {
-						attribute_hex(g, "dev" , path.dev());
-						attribute_hex(g, "func", path.func());
-					});
-				});
-			});
-		};
+		/* Sponge (2026-09-14): the func_scope lambda (device-scope XML)
+		 * was removed — its for_each_path walk throws Mmio::Range_violation
+		 * inside a deferred serialization lambda on firmware DMAR scope
+		 * layouts, killing the acpi child (and with it the usb chain).
+		 * Scope detail is report-only. */
 
 		bool ignore_drhd = config.attribute_value("ignore_drhd", false);
 		for (Dmar_entry *entry = Dmar_entry::list()->first();
 		     entry; entry = entry->next()) {
 
+			/*
+			 * Sponge (2026-09-14): per-entry guard — a misread DMAR
+			 * structure must not kill the acpi child mid-report (see
+			 * parse_dmar); skip the offending entry instead.
+			 */
+			try {
 			entry->apply([&] (Dmar_common const &dmar) {
 				if (!ignore_drhd &&
 				    dmar.read<Dmar_common::Type>() == Dmar_common::Type::DRHD)
@@ -1811,7 +1855,17 @@ void Acpi::generate_report(Genode::Env &env, Genode::Allocator &alloc,
 						attribute_hex(g, "flags", drhd.read<Dmar_drhd::Flags>());
 						attribute_hex(g, "segment", drhd.read<Dmar_drhd::Segment>());
 						attribute_hex(g, "size", 1 << size_log2);
-						drhd.apply(func_scope);
+						/*
+						 * Sponge (2026-09-14): the device-scope
+						 * sub-walk (drhd.apply/for_each_path)
+						 * throws Mmio::Range_violation on
+						 * firmware scope layouts it misreads, and
+						 * it runs inside a deferred serialization
+						 * lambda where no local guard can catch it
+						 * — killing the acpi child and stalling every
+						 * consumer (usb included). The scope detail is
+						 * report-only; omit it instead of dying.
+						 */
 					});
 				}
 
@@ -1824,9 +1878,14 @@ void Acpi::generate_report(Genode::Env &env, Genode::Allocator &alloc,
 					attribute_hex(g, "start", rmrr.read<Dmar_rmrr::Base>());
 					attribute_hex(g, "end", rmrr.read<Dmar_rmrr::Limit>());
 
-					rmrr.apply(func_scope);
+					/* Sponge (2026-09-14): see the drhd scope-walk
+					 * note above — omitted for the same
+					 * uncaught-exception reason. */
 				});
 			});
+			} catch (...) {
+				Genode::warning("DMAR report entry failed; skipping entry");
+			}
 		}
 
 		Ivdb_entry::for_each([&](auto entry) {
