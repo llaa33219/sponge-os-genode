@@ -50,7 +50,10 @@ class Decorator::Theme
 			bool none() const { return !top && !bottom && !left && !right; }
 		};
 
-		enum Element_type { ELEMENT_TYPE_CLOSER, ELEMENT_TYPE_MAXIMIZER };
+		enum Element_type { ELEMENT_TYPE_CLOSER, ELEMENT_TYPE_MAXIMIZER,
+		                    ELEMENT_TYPE_SIZER_NW, ELEMENT_TYPE_SIZER_NE,
+		                    ELEMENT_TYPE_SIZER_SW, ELEMENT_TYPE_SIZER_SE,
+		                    ELEMENT_TYPE_MINIMIZER };
 
 		Theme(Genode::Ram_allocator &ram, Genode::Env::Local_rm &rm,
 		      Genode::Allocator &alloc)

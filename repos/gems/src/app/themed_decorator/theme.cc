@@ -27,7 +27,10 @@
 #include "theme.h"
 
 
-enum Texture_id { TEXTURE_ID_DEFAULT, TEXTURE_ID_CLOSER, TEXTURE_ID_MAXIMIZER };
+enum Texture_id { TEXTURE_ID_DEFAULT, TEXTURE_ID_CLOSER, TEXTURE_ID_MAXIMIZER,
+                       TEXTURE_ID_SIZER_NW, TEXTURE_ID_SIZER_NE,
+                       TEXTURE_ID_SIZER_SW, TEXTURE_ID_SIZER_SE,
+                       TEXTURE_ID_MINIMIZER };
 
 
 struct Texture_from_png_file
@@ -65,6 +68,31 @@ texture_by_id(Genode::Ram_allocator &ram, Genode::Env::Local_rm &rm,
 		return texture.texture;
 	}
 
+	if (texture_id == TEXTURE_ID_SIZER_NW) {
+		static Texture_from_png_file texture(ram, rm, alloc, "theme/sizer_nw.png");
+		return texture.texture;
+	}
+
+	if (texture_id == TEXTURE_ID_SIZER_NE) {
+		static Texture_from_png_file texture(ram, rm, alloc, "theme/sizer_ne.png");
+		return texture.texture;
+	}
+
+	if (texture_id == TEXTURE_ID_SIZER_SW) {
+		static Texture_from_png_file texture(ram, rm, alloc, "theme/sizer_sw.png");
+		return texture.texture;
+	}
+
+	if (texture_id == TEXTURE_ID_SIZER_SE) {
+		static Texture_from_png_file texture(ram, rm, alloc, "theme/sizer_se.png");
+		return texture.texture;
+	}
+
+	if (texture_id == TEXTURE_ID_MINIMIZER) {
+		static Texture_from_png_file texture(ram, rm, alloc, "theme/minimizer.png");
+		return texture.texture;
+	}
+
 	struct Invalid_texture_id { };
 	throw  Invalid_texture_id();
 }
@@ -80,6 +108,21 @@ texture_by_element_type(Genode::Ram_allocator &ram, Genode::Env::Local_rm &rm,
 
 	case Decorator::Theme::ELEMENT_TYPE_MAXIMIZER:
 		return texture_by_id(ram, rm, alloc, TEXTURE_ID_MAXIMIZER);
+
+	case Decorator::Theme::ELEMENT_TYPE_SIZER_NW:
+		return texture_by_id(ram, rm, alloc, TEXTURE_ID_SIZER_NW);
+
+	case Decorator::Theme::ELEMENT_TYPE_SIZER_NE:
+		return texture_by_id(ram, rm, alloc, TEXTURE_ID_SIZER_NE);
+
+	case Decorator::Theme::ELEMENT_TYPE_SIZER_SW:
+		return texture_by_id(ram, rm, alloc, TEXTURE_ID_SIZER_SW);
+
+	case Decorator::Theme::ELEMENT_TYPE_SIZER_SE:
+		return texture_by_id(ram, rm, alloc, TEXTURE_ID_SIZER_SE);
+
+	case Decorator::Theme::ELEMENT_TYPE_MINIMIZER:
+		return texture_by_id(ram, rm, alloc, TEXTURE_ID_MINIMIZER);
 	}
 	struct Invalid_element_type { };
 	throw  Invalid_element_type();
@@ -183,6 +226,21 @@ Decorator::Rect Decorator::Theme::element_geometry(Element_type type) const
 
 	if (type == ELEMENT_TYPE_MAXIMIZER)
 		return ::element_geometry(_ram, _rm, _alloc, "maximizer", TEXTURE_ID_MAXIMIZER);
+
+	if (type == ELEMENT_TYPE_SIZER_NW)
+		return ::element_geometry(_ram, _rm, _alloc, "sizer_nw", TEXTURE_ID_SIZER_NW);
+
+	if (type == ELEMENT_TYPE_SIZER_NE)
+		return ::element_geometry(_ram, _rm, _alloc, "sizer_ne", TEXTURE_ID_SIZER_NE);
+
+	if (type == ELEMENT_TYPE_SIZER_SW)
+		return ::element_geometry(_ram, _rm, _alloc, "sizer_sw", TEXTURE_ID_SIZER_SW);
+
+	if (type == ELEMENT_TYPE_SIZER_SE)
+		return ::element_geometry(_ram, _rm, _alloc, "sizer_se", TEXTURE_ID_SIZER_SE);
+
+	if (type == ELEMENT_TYPE_MINIMIZER)
+		return ::element_geometry(_ram, _rm, _alloc, "minimizer", TEXTURE_ID_MINIMIZER);
 
 	struct Invalid_element_type { };
 	throw  Invalid_element_type();
