@@ -135,12 +135,14 @@ class Decorator::Window : public Window_base, public Animator::Item
 
 		Element _closer    { _animator, Theme::ELEMENT_TYPE_CLOSER,    "closer" };
 		Element _maximizer { _animator, Theme::ELEMENT_TYPE_MAXIMIZER, "maximizer" };
+		Element _minimizer { _animator, Theme::ELEMENT_TYPE_MINIMIZER, "minimizer" };
 
 		template <typename FN>
 		void _for_each_element(FN const &func)
 		{
 			func(_closer);
 			func(_maximizer);
+			func(_minimizer);
 		}
 
 		struct Gui_view : Genode::Noncopyable
@@ -590,6 +592,7 @@ class Decorator::Window : public Window_base, public Animator::Item
 			return (_alpha.dst() != (int)_alpha)
 			    || _r != _r.dst() || _g != _g.dst() || _b != _b.dst()
 			    || _closer.animated() || _maximizer.animated()
+			    || _minimizer.animated()
 			    || _animated_rect.animated();
 		}
 

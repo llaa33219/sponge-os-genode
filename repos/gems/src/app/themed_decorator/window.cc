@@ -27,6 +27,43 @@ Decorator::Window_base::Hover Decorator::Window::hover(Point abs_pos) const
 	if (geometry().contains(abs_pos))
 		return hover;
 
+	/*
+	 * Sizer bands are evaluated BEFORE the control/title checks,
+	 * mirroring the motif decorator's border-first semantics
+	 * (decorator/window.cc:310-325). The themed title strip spans
+	 * the full width of the frame's top band, so a title-first
+	 * order would make the top edge ungrabbable for resize.
+	 */
+	{
+		/*
+		 * Sizer band computation uses _decor_geometry() (the
+		 * decor band = the frame's interactive region), NOT
+		 * outer_geometry() (which also includes the aura
+		 * drop-shadow the hover gate above already excludes).
+		 * Using the aura-inclusive outer would place the band
+		 * in the non-hoverable shadow region.
+		 */
+		Rect const frame = _decor_geometry();
+
+		int const x = abs_pos.x;
+		int const y = abs_pos.y;
+
+		int const border = 4, corner = 16;
+
+		bool const at_border = x < frame.x1() + border
+		                    || x > frame.x2() - border
+		                    || y < frame.y1() + border
+		                    || y > frame.y2() - border;
+
+		if (at_border) {
+			hover.left_sizer   = x < frame.x1() + corner;
+			hover.right_sizer  = x > frame.x2() - corner;
+			hover.top_sizer    = y < frame.y1() + corner;
+			hover.bottom_sizer = y > frame.y2() - corner;
+			return hover;
+		}
+	}
+
 	Rect const closer_geometry =
 		_theme.absolute(_theme.element_geometry(Theme::ELEMENT_TYPE_CLOSER),
 		                                        outer_geometry());
@@ -43,22 +80,20 @@ Decorator::Window_base::Hover Decorator::Window::hover(Point abs_pos) const
 		return hover;
 	}
 
+	Rect const minimizer_geometry =
+		_theme.absolute(_theme.element_geometry(Theme::ELEMENT_TYPE_MINIMIZER),
+		                                        outer_geometry());
+	if (_minimizer.present() && minimizer_geometry.contains(abs_pos)) {
+		hover.minimizer = true;
+		return hover;
+	}
+
 	Rect const title_geometry = _theme.absolute(_theme.title_geometry(),
 	                                            outer_geometry());
 	if (title_geometry.contains(abs_pos)) {
 		hover.title = true;
 		return hover;
 	}
-
-	int const x = abs_pos.x;
-	int const y = abs_pos.y;
-
-	Area const theme_size = _theme.background_size();
-
-	hover.left_sizer   = x < outer_geometry().x1() + (int)theme_size.w/2;
-	hover.right_sizer  = x > outer_geometry().x2() - (int)theme_size.w/2;
-	hover.top_sizer    = y < outer_geometry().y1() + (int)theme_size.h/2;
-	hover.bottom_sizer = y > outer_geometry().y2() - (int)theme_size.h/2;
 
 	return hover;
 }
