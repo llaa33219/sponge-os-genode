@@ -131,19 +131,45 @@ struct Genode::Component_env : Env
 				if (cap.valid())
 					return cap;
 
-				_block_for_session();
+				/*
+				 * The parent answered the session request asynchronously.
+				 * Block until the session becomes available or fails.
+				 *
+				 * The Blockade signal is shared by all sessions of the
+				 * component and by the sandbox-forwarded upgrade
+				 * responses (which no component-side thread waits for).
+				 * A wake-up may therefore be caused by an unrelated
+				 * session. In this case, 'session_cap' returns an
+				 * invalid capability without an error, i.e., our session
+				 * is still pending. We must re-block in this case.
+				 * Returning the invalid capability instead would make
+				 * 'session()' re-send the session request under the same
+				 * session ID, which the parent rejects as a conflicting
+				 * session ID — a component-fatal denial.
+				 */
+				for (;;) {
+					_block_for_session();
 
-				return _parent.session_cap(id).convert<Session_result>(
-					[&] (Capability<Session> cap) { return cap; },
-					[&] (Parent::Session_cap_error const e) -> Session_result {
-						using Error = Parent::Session_cap_error;
-						switch (e) {
-						case Error::INSUFFICIENT_RAM:  return Session_error::INSUFFICIENT_RAM;
-						case Error::INSUFFICIENT_CAPS: return Session_error::INSUFFICIENT_CAPS;
-						case Error::DENIED:            break;
-						}
-						return Session_error::DENIED; }
-				);
+					Session_result const result =
+						_parent.session_cap(id).convert<Session_result>(
+							[&] (Capability<Session> cap) { return Session_result(cap); },
+							[&] (Parent::Session_cap_error const e) {
+								using Error = Parent::Session_cap_error;
+								switch (e) {
+								case Error::INSUFFICIENT_RAM:  return Session_error::INSUFFICIENT_RAM;
+								case Error::INSUFFICIENT_CAPS: return Session_error::INSUFFICIENT_CAPS;
+								case Error::DENIED:            break;
+								}
+								return Session_error::DENIED; }
+						);
+
+					bool const still_pending = result.convert<bool>(
+						[&] (Capability<Session> cap) { return !cap.valid(); },
+						[&] (Session_error)           { return false; });
+
+					if (!still_pending)
+						return result;
+				}
 			},
 			[&] (Session_error e) { return e; });
 	}
