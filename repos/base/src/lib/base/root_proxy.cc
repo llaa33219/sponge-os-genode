@@ -255,7 +255,27 @@ void Root_proxy::_handle_session_requests()
 	requests.for_each_sub_node([&] (Node const &request) {
 		_handle_session_request(request, "close"); });
 
-	requests.for_each_sub_node([&] (Node const &request) {
+	/*
+	 * Re-read the ROM before processing create requests.
+	 *
+	 * The upgrade and close handlers above perform synchronous
+	 * 'Root_client' RPCs. While the dispatch loop is suspended
+	 * inside such an RPC, the parent may submit further session
+	 * requests via 'Session_requester::trigger_update' — in
+	 * particular in nested-sandbox topologies where the wakeup
+	 * of one sandbox level triggers session requests at another
+	 * level. Because the 'requests' node above is a snapshot of
+	 * the ROM version read before those RPCs, create requests
+	 * that arrived in the meantime would go unnoticed and the
+	 * corresponding clients would block forever. Re-reading the
+	 * ROM (and re-acquiring the node — the update may have
+	 * swapped the dataspace) closes this window.
+	 */
+	_session_requests.update();
+
+	Node const fresh_requests = _session_requests.node();
+
+	fresh_requests.for_each_sub_node([&] (Node const &request) {
 		_handle_session_request(request, "create"); });
 }
 
