@@ -6,6 +6,37 @@ TARGET = qt6_base.cmake_target
 #   <genode>/repos/libports/src/qt6/base/ -> <genode>/repos/sponge/tool/
 SPONGE_TOOL_DIR := $(abspath $(dir $(realpath $(call select_from_repositories,src/qt6/base/target.mk))))/../../../../sponge/tool
 
+# Sponge OS patch ledger row #23 (docs/11-environment.md section 4):
+# the 'genode' QPA platform plugin has no frame pacing, so a client can
+# queue repaints faster than nitpicker drains them and the damage backlog
+# grows without bound (measured: 11 repaints/s sustained against a
+# requested 30, with ZERO bytes of growth anywhere - the freeze is not a
+# leak). The patch file is the durable record because genode/contrib/ is
+# fetched by prepare_port and is NOT git-tracked.
+#
+#   <repo>/docs/patches/qt6-qpa-frame-sync.patch
+#   rationale + measurements: docs/evidence/sponge-debug-scrollstorm.md
+#
+# GENODE_DIR is not exported to per-target sub-makes, so the repository
+# root is derived from this file's own location:
+#   <genode>/repos/libports/src/qt6/base/ -> <repo>
+SPONGE_PATCH_DIR := $(abspath $(dir $(realpath $(call select_from_repositories,src/qt6/base/target.mk))))/../../../../../../docs/patches
+
+QPA_PATCH_FILE  := $(SPONGE_PATCH_DIR)/qt6-qpa-frame-sync.patch
+QPA_PATCH_STAMP := qpa_frame_sync_patched.tag
+
+# 'patch --forward' is idempotent: on an already-patched tree it reports
+# the hunks as reversed/previously applied, skips them, and exits 0.
+# The MANUAL equivalent (AGENTS.md section 3.5 requires one):
+#
+#   cd genode/contrib/qt6_base-<hash>/src/lib/qt6_base
+#   patch -p1 --forward < <repo>/docs/patches/qt6-qpa-frame-sync.patch
+#
+# and, after re-running './tool/build ports' (which re-fetches the port
+# and therefore reverts the tree):
+#
+#   rm genode/build/x86_64/qt6/base/qpa_frame_sync_patched.tag
+#
 ifeq ($(CONTRIB_DIR),)
 QT6_BASE_DIR       = $(call select_from_repositories,src/lib/qt6_base)
 else
@@ -14,6 +45,22 @@ QT6_BASE_DIR       = $(QT6_BASE_PORT_DIR)/src/lib/qt6_base
 endif
 
 LIBS = qt6_cmake ldso_so_support libc libm stdcxx qt6_component egl mesa base qoost
+
+#
+# A partially-applied tree is NOT tolerated: the forward 'patch' below
+# would skip the already-applied hunks and exit non-zero, which fails
+# this rule loudly instead of leaving a half-patched plugin behind.
+#
+$(QPA_PATCH_STAMP): $(QPA_PATCH_FILE)
+	$(VERBOSE)echo "Sponge OS ledger row #23: Qt6 QPA frame pacing"
+	$(VERBOSE)if cd $(QT6_BASE_DIR) && \
+	     patch -p1 --reverse --dry-run --reject-file=- < $(QPA_PATCH_FILE) >/dev/null 2>&1; \
+	 then echo "  already applied - nothing to do"; \
+	 else cd $(QT6_BASE_DIR) && \
+	      patch -p1 --forward --reject-file=- < $(QPA_PATCH_FILE); \
+	 fi
+	$(VERBOSE)touch $@
+
 
 INSTALL_LIBS = lib/libQt6Concurrent.lib.so \
                lib/libQt6Core.lib.so \
@@ -35,7 +82,7 @@ BUILD_ARTIFACTS = $(notdir $(INSTALL_LIBS)) \
                   qt6_libqjpeg.tar \
                   qt6_libqsqlite.tar
 
-cmake_prepared.tag: build_dependencies/lib/ld.lib.so
+cmake_prepared.tag: build_dependencies/lib/ld.lib.so $(QPA_PATCH_STAMP)
 
 build: cmake_prepared.tag
 
