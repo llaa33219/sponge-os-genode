@@ -1,5 +1,11 @@
 TARGET = qt6_base.cmake_target
 
+# Sponge OS: the compiler wrappers live in the Sponge repository. GENODE_DIR
+# is not exported to per-target sub-makes, so derive the wrapper directory
+# from this file's own location instead:
+#   <genode>/repos/libports/src/qt6/base/ -> <genode>/repos/sponge/tool/
+SPONGE_TOOL_DIR := $(abspath $(dir $(realpath $(call select_from_repositories,src/qt6/base/target.mk))))/../../../../sponge/tool
+
 ifeq ($(CONTRIB_DIR),)
 QT6_BASE_DIR       = $(call select_from_repositories,src/lib/qt6_base)
 else
@@ -46,11 +52,13 @@ build: cmake_prepared.tag
 		-G "Unix Makefiles" \
 		-DQT_SILENCE_CMAKE_GENERATOR_WARNING=ON \
 		-DCMAKE_SYSTEM_NAME="Genode" \
+		-DCMAKE_C_IMPLICIT_INCLUDE_DIRECTORIES="" \
+		-DCMAKE_CXX_IMPLICIT_INCLUDE_DIRECTORIES="" \
 		-DCMAKE_AR="$(AR)" \
-		-DCMAKE_C_COMPILER="$(CC)" \
-		-DCMAKE_C_FLAGS="$(GENODE_CMAKE_CFLAGS) -DPCRE2_DISABLE_JIT" \
-		-DCMAKE_CXX_COMPILER="$(CXX)" \
-		-DCMAKE_CXX_FLAGS="$(GENODE_CMAKE_CFLAGS)" \
+		-DCMAKE_C_COMPILER="$(SPONGE_TOOL_DIR)/genode-x86-gcc-wrapper" \
+		-DCMAKE_C_FLAGS="$(GENODE_CMAKE_CFLAGS) -DPCRE2_DISABLE_JIT -D__GNUCLIKE_BUILTIN_STDARG -include sys/cdefs.h" \
+		-DCMAKE_CXX_COMPILER="$(SPONGE_TOOL_DIR)/genode-x86-g++-wrapper" \
+		-DCMAKE_CXX_FLAGS="$(GENODE_CMAKE_CFLAGS) -D__GNUCLIKE_BUILTIN_STDARG -include sys/cdefs.h -I$(QT6_BASE_DIR)/src/3rdparty/md4c" \
 		-DCMAKE_EXE_LINKER_FLAGS="$(GENODE_CMAKE_LFLAGS_APP)" \
 		-DCMAKE_SHARED_LINKER_FLAGS="$(GENODE_CMAKE_LFLAGS_SHLIB)" \
 		-DCMAKE_MODULE_LINKER_FLAGS="$(GENODE_CMAKE_LFLAGS_SHLIB)" \
@@ -85,6 +93,10 @@ build: cmake_prepared.tag
 		-DFEATURE_version_tagging=OFF \
 		-DFEATURE_intelcet=OFF \
 		-DFEATURE_stack_protector=OFF \
+		-DFEATURE_system_doubleconversion=OFF \
+		-DFEATURE_system_md4c=OFF \
+		-DFEATURE_textmarkdownreader=OFF \
+		-DFEATURE_textmarkdownwriter=OFF \
 		$(QT6_BASE_DIR) \
 		$(QT6_OUTPUT_FILTER)
 
