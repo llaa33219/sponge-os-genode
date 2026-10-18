@@ -148,6 +148,13 @@ struct Framebuffer::Main
 	{
 		log("using boot framebuffer: ", _info);
 
+		/*
+		 * Read the initial config ROM here: '_handle_config' runs only
+		 * on config CHANGES, so without this the heartbeat flag (and
+		 * any initial period_ms) would never take effect at boot.
+		 */
+		_handle_config();
+
 		_config.sigh(_config_handler);
 		_timer .sigh(_timer_handler);
 
