@@ -154,6 +154,18 @@ struct Sandbox::Start_model : Noncopyable
 	struct { Child *_child_ptr = nullptr; };
 	struct { Alias *_alias_ptr = nullptr; };
 
+	/*
+	 * Number of heartbeat-triggered restarts of this <start> node. It
+	 * lives here, not in the Child, because the Child is destroyed and
+	 * rebuilt on every restart - only this object outlives an incarnation.
+	 */
+	unsigned _restarts = 0;
+
+	/* distinguishes the recreate-after-abandon inside
+	 * apply_child_restart from a creation driven by a new config
+	 * generation; only the latter clears _restarts */
+	bool _respawning = false;
+
 	void _reset()
 	{
 		if (_child_ptr) _child_ptr->abandon();
@@ -196,8 +208,18 @@ struct Sandbox::Start_model : Noncopyable
 
 		} else {
 
-			if (!_child_ptr && _factory.ready_to_create_child(_name, _version))
+			if (!_child_ptr && _factory.ready_to_create_child(_name, _version)) {
 				_child_ptr = &_factory.create_child(node);
+
+				/* A config-driven creation - a new <start> node, a bumped
+				 * version, an operator edit - is a deliberate restart and
+				 * clears the budget. Only the recreate inside
+				 * apply_child_restart carries the count forward. */
+				if (!_respawning)
+					_restarts = 0;
+
+				_child_ptr->set_restart_count(_restarts);
+			}
 		}
 
 		/* update */
@@ -213,12 +235,29 @@ struct Sandbox::Start_model : Noncopyable
 	{
 		if (_child_ptr && _child_ptr->restart_scheduled()) {
 
+			_restarts = _child_ptr->restart_count();
+
 			/* tear down */
 			_child_ptr->abandon();
 			_child_ptr = nullptr;
 
 			/* respawn */
+			_respawning = true;
 			update_from_node(node);
+			_respawning = false;
+
+		} else if (_child_ptr && _child_ptr->restart_aborted()) {
+
+			/*
+			 * The heartbeat restart budget is spent: tear the child down
+			 * like a restarted one but leave the <start> node empty, so
+			 * the fault is not regenerated on a timer. Only a new
+			 * configuration generation - which requires the config owner
+			 * to act - brings the child back.
+			 */
+			_restarts = 0;
+			_child_ptr->abandon();
+			_child_ptr = nullptr;
 		}
 	}
 

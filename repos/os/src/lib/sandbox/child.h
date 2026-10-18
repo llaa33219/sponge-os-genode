@@ -118,6 +118,15 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 			RESTART_SCHEDULED,
 
 			/*
+			 * The child exhausted its heartbeat restart budget. It is torn
+			 * down like a restarted child but NOT respawned, so the config
+			 * model ends up with no child under this <start> node. Only a
+			 * new configuration generation - which only the owner of the
+			 * config can produce - can bring it back.
+			 */
+			RESTART_ABORTED,
+
+			/*
 			 * The child is no longer referenced by config model and can
 			 * safely be destructed.
 			 */
@@ -200,12 +209,15 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 		{
 			bool     enabled;
 			unsigned restart_after_skipped;
+			unsigned restart_budget;
 
 			static Heartbeat from_start_node(Node const &node)
 			{
 				return node.with_sub_node("heartbeat",
 					[&] (Node const &node) -> Heartbeat {
-						return { true, node.attribute_value("restart_after_skipped", 0u) }; },
+						return { true,
+						         node.attribute_value("restart_after_skipped", 0u),
+						         node.attribute_value("restart_budget", 0u) }; },
 					[&] {
 						return Heartbeat { }; });
 			}
@@ -213,6 +225,24 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 			bool restart_needed(unsigned skipped) const
 			{
 				return restart_after_skipped && (skipped > restart_after_skipped);
+			}
+
+			/*
+			 * 'restart_budget' caps how often a child may be abandoned and
+			 * respawned for a heartbeat fault that never heals. Upstream
+			 * has no such cap, so a child whose entrypoint is permanently
+			 * blocked is respawned at the full heartbeat rate forever: each
+			 * cycle tears the child down and builds a fresh one, which is
+			 * CPU work in the parent AND in the kernel, and it keeps the
+			 * child permanently unusable instead of letting an outer
+			 * supervisor decide what to do.
+			 *
+			 * A budget of 0 means unlimited, which is the upstream
+			 * behaviour; the budget is opt-in per <start> node.
+			 */
+			bool restart_allowed(unsigned restarts_so_far) const
+			{
+				return restart_budget == 0 || restarts_so_far < restart_budget;
 			}
 
 		} _heartbeat;
@@ -224,6 +254,17 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 		 * due to heartbeat events.
 		 */
 		unsigned _last_skipped_heartbeats = 0;
+
+		/*
+		 * Consecutive heartbeat-triggered restarts of this child, owned by
+		 * the config model's <start> node so the count survives the
+		 * teardown of each incarnation. Reset as soon as the child answers
+		 * a heartbeat, so the budget bounds a *run of failures*, not the
+		 * child's lifetime.
+		 */
+		unsigned _restart_count = 0;
+		bool     _restart_budget_reported = false;
+		bool     _restart_budget_announced = false;
 
 		/* return true if heartbeat tracking is active */
 		bool _heartbeat_expected() const
@@ -549,6 +590,12 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 			_abandon_services();
 		}
 
+		void _abort_restart()
+		{
+			_state = State::RESTART_ABORTED;
+			_abandon_services();
+		}
+
 	public:
 
 		/**
@@ -638,6 +685,11 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 
 		bool restart_scheduled() const { return _state == State::RESTART_SCHEDULED; }
 
+		bool restart_aborted() const { return _state == State::RESTART_ABORTED; }
+
+		unsigned restart_count() const { return _restart_count; }
+		void set_restart_count(unsigned n) { _restart_count = n; }
+
 		bool stuck() const { return _state == State::STUCK; }
 
 		bool env_sessions_closed() const { return _child.env_sessions_closed(); }
@@ -682,15 +734,43 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 			if (_last_skipped_heartbeats != skipped_heartbeats) {
 
 				if (_heartbeat.restart_needed(skipped_heartbeats)) {
-					_schedule_restart();
-					_heartbeat_alarm_trigger.trigger_heartbeat_alarm();
+
+					if (_heartbeat.restart_allowed(_restart_count)) {
+						_restart_count++;
+						_schedule_restart();
+						_heartbeat_alarm_trigger.trigger_heartbeat_alarm();
+
+					} else {
+						if (!_restart_budget_reported) {
+							_restart_budget_reported = true;
+							warning(name(),
+							        ": heartbeat restart budget (",
+							        _heartbeat.restart_budget,
+							        ") exhausted after ", _restart_count,
+							        " restarts - child left stopped, escalation\
+ is up to whoever owns the config");
+						}
+						if (!_restart_budget_announced) {
+							_restart_budget_announced = true;
+							_abort_restart();
+							_heartbeat_alarm_trigger.trigger_heartbeat_alarm();
+						}
+					}
 				}
 
 				_report_update_trigger.trigger_report_update();
 			}
 
-			_last_skipped_heartbeats = skipped_heartbeats;
+			/* The child recovered WITHIN this incarnation - a fresh
+			 * incarnation also starts at 0 but must inherit the budget it
+			 * already spent, so only a transition from skipping to
+			 * answering clears the count. */
+			if (skipped_heartbeats == 0 && _last_skipped_heartbeats != 0) {
+				_restart_count = 0;
+				_restart_budget_reported = false;
+			}
 
+			_last_skipped_heartbeats = skipped_heartbeats;
 		}
 
 		unsigned skipped_heartbeats() const

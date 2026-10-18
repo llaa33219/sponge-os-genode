@@ -459,6 +459,13 @@ void Genode::Sandbox::Library::apply_config(Node const &config)
 				return;
 			}
 
+			/* A child that spent its heartbeat restart budget is torn down
+			 * through the same pass, but is not recreated. */
+			if (child.restart_aborted()) {
+				any_restart_scheduled = true;
+				return;
+			}
+
 			if (_server_appeared_or_disappeared || child.uncertain_dependencies())
 				child.evaluate_dependencies();
 

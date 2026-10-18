@@ -29,7 +29,7 @@ void Sandbox::Child::destroy_services()
 Sandbox::Child::Apply_config_result
 Sandbox::Child::apply_config(Node const &start_node)
 {
-	if (abandoned() || stuck() || restart_scheduled() || _exited)
+	if (abandoned() || stuck() || restart_scheduled() || restart_aborted() || _exited)
 		return NO_SIDE_EFFECTS;
 
 	/*
