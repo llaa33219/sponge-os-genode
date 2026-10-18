@@ -346,7 +346,21 @@ class Genode::Packet_descriptor_transmitter
 
 			bool signal_submitted = false;
 
-			if (_tx_wakeup_needed) {
+			/*
+			 * Sponge (row 16, upstream issue #5338): also signal when
+			 * the tx queue is non-empty. The transition flag alone can
+			 * be lost when the consumer-side drain and this producer
+			 * side observe different queue states ('single_element()'
+			 * wrongly false), permanently suppressing the wakeup while
+			 * packets wait in the queue — observed as the usb host
+			 * driver delivering completions while the usb_hid client
+			 * slept forever. Re-checking the real queue state makes
+			 * every subsequent wakeup() self-healing: a stale flag can
+			 * suppress at most one wakeup, never the delivery itself.
+			 * The worst case is a redundant signal, which the signal
+			 * receiver coalesces anyway.
+			 */
+			if (_tx_wakeup_needed || !_tx_queue->empty()) {
 				_rx_ready.submit();
 				signal_submitted = true;
 			}
