@@ -2,7 +2,7 @@ LICENSE   := LGPL
 VERSION   := 14.2.0
 DOWNLOADS := gcc.archive
 
-URL(gcc) := http://ftp.fu-berlin.de/gnu/gcc/gcc-$(VERSION)/gcc-$(VERSION).tar.xz
+URL(gcc) := https://ftp.gnu.org/gnu/gcc/gcc-$(VERSION)/gcc-$(VERSION).tar.xz
 SHA(gcc) := a7b39bc69cbf9e25826c5a60ab26477001f7c08d85cec04bc0e29cabed6f3cc9
 DIR(gcc) := src/lib/stdcxx
 SIG(gcc) := ${URL(gcc)}
