@@ -139,37 +139,55 @@ class Core::Cnode : public Cnode_base, Noncopyable
 
 	public:
 
-		/**
-		 * Constructor
-		 *
-		 * \param parent_sel  CNode where to place the cap selector of the
-		 *                    new CNode
-		 * \param dst_idx     designated index within 'parent_sel' referring to
-		 *                    the created CNode
-		 * \param size_log2   number of entries in CNode
-		 * \param phys_alloc  physical-memory allocator used for allocating
-		 *                    the CNode backing store
-		 *
-		 * \deprecated
-		 */
-		Cnode(Cap_sel parent_sel, Index dst_idx, uint8_t size_log2,
-		      Range_allocator &phys_alloc)
-		:
-			Cnode_base(dst_idx, size_log2),
-			_phys(Untyped_memory::alloc_page(phys_alloc))
-		{
-			bool ok = false;
+	/**
+	 * Constructor
+	 *
+	 * \param parent_sel  CNode where to place the cap selector of the
+	 *                    new CNode
+	 * \param dst_idx     designated index within 'parent_sel' referring to
+	 *                    the created CNode
+	 * \param size_log2   number of entries in CNode
+	 * \param phys_alloc  physical-memory allocator used for allocating
+	 *                    the CNode backing store
+	 *
+	 * \deprecated
+	 *
+	 * Sponge: size-aware backing. A CNode of size_log2 needs
+	 * 2^(Cnode_kobj::SIZE_LOG2 + size_log2) bytes of backing. Backings up to
+	 * one page come from the 4 KiB pool (upstream behaviour); larger backings
+	 * come from the 16 KiB untyped pool and are addressed by the matching
+	 * untyped CNode. The large-backing path follows the proven VTX pattern
+	 * (spec/x86/platform_thread.cc).
+	 */
+	Cnode(Cap_sel parent_sel, Index dst_idx, uint8_t size_log2,
+	      Range_allocator &phys_alloc)
+	:
+		Cnode_base(dst_idx, size_log2)
+	{
+		addr_t const backing_log2 = Cnode_kobj::SIZE_LOG2 + size_log2;
+		bool   const large        = backing_log2 > PAGE_SIZE_LOG2;
+		size_t const num_pages    = 1UL << (backing_log2 - PAGE_SIZE_LOG2);
 
-			_phys.with_result([&](auto &res) {
-				auto const service = Untyped_memory::untyped_sel(addr_t(res.ptr)).value();
-				ok = create<Cnode_kobj>(service, parent_sel, dst_idx, size_log2);
-			}, [&](auto) { /* ok stays false */ });
+		Range_allocator &pool = Untyped_memory::cnode_backing_alloc(size_log2,
+		                                                           phys_alloc);
 
-			if (!ok) {
-				error("Cnode construction failed");
-				_phys = { };
-			}
+		_phys = large ? Untyped_memory::alloc_pages(pool, num_pages)
+		              : Untyped_memory::alloc_page(pool);
+
+		bool ok = false;
+
+		_phys.with_result([&](auto &res) {
+			auto const service = large
+				? Untyped_memory::untyped_sel(addr_t(res.ptr), backing_log2).value()
+				: Untyped_memory::untyped_sel(addr_t(res.ptr)).value();
+			ok = create<Cnode_kobj>(service, parent_sel, dst_idx, size_log2);
+		}, [&](auto) { /* ok stays false */ });
+
+		if (!ok) {
+			error("Cnode construction failed");
+			_phys = { };
 		}
+	}
 
 		bool constructed() const
 		{
@@ -220,8 +238,18 @@ class Core::Cnode : public Cnode_base, Noncopyable
 				error(__PRETTY_FUNCTION__, ": seL4_CNode_Delete (",
 				      Hex(sel().value()), ") returned ", ret);
 
+			addr_t const backing_log2 = Cnode_kobj::SIZE_LOG2 + size_log2();
+			bool   const large        = backing_log2 > PAGE_SIZE_LOG2;
+			size_t const num_pages    = 1UL << (backing_log2 - PAGE_SIZE_LOG2);
+
+			Range_allocator &pool = Untyped_memory::cnode_backing_alloc(size_log2(),
+			                                                           phys_alloc);
+
 			_phys.with_result([&](auto &phys) {
-				Untyped_memory::free_page(phys_alloc, addr_t(phys.ptr));
+				if (large)
+					Untyped_memory::free_pages(pool, addr_t(phys.ptr), num_pages);
+				else
+					Untyped_memory::free_page(pool, addr_t(phys.ptr));
 			}, [] (auto){ /* handled at the beginning of the method */ });
 
 			_phys = { };

@@ -15,6 +15,8 @@
 /* core includes */
 #include <io_mem_session_component.h>
 #include <untyped_memory.h>
+#include <platform.h>
+#include <platform_generic.h>
 
 
 using namespace Core;
@@ -63,6 +65,25 @@ Io_mem_session_component::Dataspace_attr Io_mem_session_component::_acquire(Phys
 			convert_size -= PAGE_SIZE;
 
 		size_t const num_pages = convert_size >> PAGE_SIZE_LOG2;
+
+		/*
+		 * Sponge (row 14): for phys_addr above HIGH_PHYS_BASE (8 GiB),
+		 * trigger the lazy creation of the dedicated high-phys CNode
+		 * before the retyp. The CNode MUST exist by the time
+		 * convert_to_page_frames fires (it points node_index at
+		 * TOP_CNODE_HIGH_PHYS_IDX), and convert_to_page_frames now
+		 * handles both the high-phys retyp (via _high_phys_untyped_sel)
+		 * and the low-phys retyp paths. Failure to construct the CNode
+		 * (16K pool exhausted, etc.) is logged and the IO_MEM session
+		 * fails cleanly with "I/O memory ... not available" — no
+		 * crash. See docs/11-environment.md row 14.
+		 */
+		if (convert_phys >= Core_cspace::HIGH_PHYS_BASE
+		    && !platform_specific().construct_high_phys_cnode()) {
+			error("high-phys CNode unavailable; IO_MEM ",
+			      Hex_range<addr_t>(req_base, req_size), " fails");
+			return Dataspace_attr();
+		}
 
 		if (!Untyped_memory::convert_to_page_frames(convert_phys, num_pages))
 			return Dataspace_attr();

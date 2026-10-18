@@ -88,14 +88,19 @@ class Core::Initial_untyped_pool
 		/**
 		 * Apply functor to each untyped memory range
 		 *
-		 * The functor is called with 'Range &' as argument.
+		 * The functor is called with 'Range &', the current physical
+		 * address (offset into the untyped), the size (typically
+		 * PAGE_SIZE*256 == 1 MiB for the standard retyp batch), and
+		 * the device flag.
 		 */
 		void for_each_range(auto const &fn)
 		{
 			seL4_BootInfo const &bi = sel4_boot_info();
 			for (addr_t sel = bi.untyped.start; sel < bi.untyped.end; sel++) {
 				Range range(*this, (unsigned)sel);
-				fn(range);
+				fn(range, range.phys + range.free_offset,
+				   min(1UL << 20, range.size - range.free_offset),
+				   range.device);
 			}
 		}
 
@@ -123,7 +128,7 @@ class Core::Initial_untyped_pool
 			 * Go through the known initial untyped memory ranges to find
 			 * a range that is able to host a kernel object of 'size'.
 			 */
-			for_each_range([&] (Range const &range) {
+			for_each_range([&] (Range const &range, addr_t const, addr_t const, bool const) {
 				/* ignore device memory */
 				if (range.device)
 					return;
@@ -181,7 +186,7 @@ class Core::Initial_untyped_pool
 		                              uint8_t const size_log2 = PAGE_SIZE_LOG2,
 		                              addr_t  max_memory = 0UL - 0x1000UL)
 		{
-			for_each_range([&] (Range const &range) {
+			for_each_range([&] (Range const &range, addr_t const /*phys*/, addr_t const /*size*/, bool const /*device*/) -> bool {
 
 				/*
 				 * The kernel limits the maximum number of kernel objects to
@@ -196,10 +201,10 @@ class Core::Initial_untyped_pool
 
 					/* back out if no further page can be allocated */
 					if (page_aligned_free_offset + (1UL << size_log2) > range.size)
-						return;
+						return true;
 
 					if (!max_memory)
-						return;
+						return true;
 
 					size_t const remaining_size    = range.size - page_aligned_free_offset;
 					size_t const retype_size_limit = PAGE_SIZE*256;
@@ -218,18 +223,37 @@ class Core::Initial_untyped_pool
 
 					/* skip memory because of limited untyped phys cnode range */
 					if (node_offset >= (1UL << (Core_cspace::NUM_PHYS_SEL_LOG2))) {
-						warning(range.device ? "device" : "      ", " memory in range ",
-						        Hex_range<addr_t>(range.phys, range.size),
-						        " is unavailable (due to limited untyped cnode range)");
-						return;
+						/*
+						 * Sponge (row 14): device memory above 8 GiB is
+						 * NOT dropped here — Platform::_init_allocators
+						 * registers the range in _io_mem_alloc and the
+						 * functor returns false to skip the eager retyp.
+						 * The page-frame caps are created lazily — on
+						 * demand — in the dedicated high-phys CNode
+						 * (constructed on first IO_MEM request that
+						 * needs it, see Platform::construct_high_phys_cnode()).
+						 * Skip the warning AND fall through to the
+						 * functor call so the range is registered.
+						 */
+						bool const high_phys_device =
+							range.device && range.phys >= Core_cspace::HIGH_PHYS_BASE;
+
+						if (!high_phys_device)
+							warning(range.device ? "device" : "      ", " memory in range ",
+							        Hex_range<addr_t>(range.phys, range.size),
+							        " is unavailable (due to limited untyped cnode range)");
+
+						/* fall through to functor for high_phys_device */
+						if (!high_phys_device)
+							return true;
 					}
 
 					/* invoke callback about the range */
-					bool const used = fn(phys_addr, num_pages << size_log2,
+					bool const used = fn(range, phys_addr, num_pages << size_log2,
 					                     range.device);
 
 					if (!used)
-						return;
+						return true;
 
 					long const ret = seL4_Untyped_Retype(service,
 					                                     type,
@@ -243,10 +267,8 @@ class Core::Initial_untyped_pool
 					if (ret != 0) {
 						error("turn_into_untyped_object : "
 						      "seL4_Untyped_Retype (untyped) returned ", ret);
-
-						fn_revert(phys_addr, num_pages << size_log2,
-						          range.device);
-						return;
+						fn_revert(range, phys_addr, num_pages << size_log2, range.device);
+						return false;
 					}
 
 					/* mark consumed untyped memory range as allocated */

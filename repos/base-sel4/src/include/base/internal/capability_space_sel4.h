@@ -102,12 +102,33 @@ namespace Genode
 		INITIAL_SEL_END
 	};
 
-	enum {
-		CSPACE_SIZE_LOG2_1ST      = 6,
-		CSPACE_SIZE_LOG2_2ND      = (CONFIG_WORD_SIZE == 32) ? 8 : 7,
-		CSPACE_SIZE_LOG2          = CSPACE_SIZE_LOG2_1ST + CSPACE_SIZE_LOG2_2ND,
-		NUM_CORE_MANAGED_SEL_LOG2 = 8,
-	};
+enum {
+	/*
+	 * Sponge (x86_64 only): per-PD main CSpace enlarged to 65536 slots
+	 * (1ST 6->7, 2ND 7->9). 2nd-level CNodes (size_log2=9) need 16 KiB
+	 * backing, drawn on demand from the 16 KiB untyped pool at CNode
+	 * construction (see cnode.h, x86_64/platform.cc). The 1st-level CNode
+	 * (128 entries x 32 B) stays 4 KiB-backed. Other architectures keep
+	 * the upstream page-sized CSpace geometry byte-for-byte.
+	 *
+	 * History: 32768 (row 6, 2ND 7->9) was enough for falkon but the
+	 * 17ZD90N real-hw boot exhausted the vfs/rom_lib PDs' mapping
+	 * registry caps (slow real-USB I/O inflates the concurrently-live
+	 * page set; OVMF already grazed the limit) and stalled in the
+	 * mapping-cache flush. Doubling the ceiling gives the storage-
+	 * serving PDs headroom; the 16 KiB pool reservation is kept at the
+	 * proven magnitude by decoupling it from 1ST (see x86_64/platform.cc).
+	 */
+#ifdef __x86_64__
+	CSPACE_SIZE_LOG2_1ST      = 7,
+	CSPACE_SIZE_LOG2_2ND      = 9,
+#else
+	CSPACE_SIZE_LOG2_1ST      = 6,
+	CSPACE_SIZE_LOG2_2ND      = (CONFIG_WORD_SIZE == 32) ? 8 : 7,
+#endif
+	CSPACE_SIZE_LOG2          = CSPACE_SIZE_LOG2_1ST + CSPACE_SIZE_LOG2_2ND,
+	NUM_CORE_MANAGED_SEL_LOG2 = 8,
+};
 };
 
 

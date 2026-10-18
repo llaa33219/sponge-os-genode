@@ -17,9 +17,69 @@
 using namespace Core;
 
 
-Phys_allocator &Core::phys_alloc_16k(Allocator *core_mem_alloc)
+namespace {
+
+	/*
+	 * Sponge (row 15): metadata backing for the 16 KiB physical pool's
+	 * allocator tree, served from a static core-local arena instead of
+	 * core's mapped-memory allocator. Growing the AVL slab via
+	 * 'core_mem_alloc' allocates a fresh core mapping on the fly
+	 * (_map_local -> page tables/CNodes), which itself allocates from
+	 * the 16 KiB pool while the pool's mutex is still held by the
+	 * outer alloc_aligned — a same-thread mutex re-acquire that
+	 * deadlocks core ("deadlock ahead") once runtime concurrency
+	 * (boot_fb blit timer x storage chain, Phase 15) grows the tree
+	 * past its initial blocks. The arena is a plain bump allocator:
+	 * the metadata (4 MiB, ~85 nodes per 4 KiB block) is tiny compared
+	 * to the pool it manages, and exhaustion fails allocations cleanly
+	 * with OUT_OF_RAM instead of deadlocking.
+	 */
+	struct Avl_metadata_arena : Genode::Allocator
+	{
+		enum { ARENA_SIZE = 4 * 1024 * 1024 };
+
+		alignas(4096) char _space[ARENA_SIZE] { };
+		size_t _consumed { 0 };
+
+		Alloc_result try_alloc(size_t num_bytes) override
+		{
+			if (num_bytes > sizeof(_space) - _consumed)
+				return Genode::Alloc_error::OUT_OF_RAM;
+
+			void * const ptr = _space + _consumed;
+			_consumed += num_bytes;
+			return { *this, { ptr, num_bytes } };
+		}
+
+		void   _free(Allocation &) override { }
+		void   free(void *, size_t) override { }
+		bool   need_size_for_free() const override { return false; }
+		size_t overhead(size_t) const override { return 0; }
+		size_t consumed() const override { return _consumed; }
+	};
+}
+
+
+Phys_allocator &Core::phys_alloc_16k(Allocator * /* core_mem_alloc */)
 {
-	static Phys_allocator phys_alloc_16k(core_mem_alloc);
+	/*
+	 * Sponge (row 15): the pool's AVL metadata is served from a static
+	 * core-local arena (see Avl_metadata_arena above) instead of
+	 * core's mapped-memory allocator. Growing the AVL slab via
+	 * 'core_mem_alloc' allocates a fresh core mapping on the fly
+	 * (_map_local -> page tables/CNodes), which itself allocates from
+	 * this very pool while the pool's mutex is still held by the outer
+	 * alloc_aligned — a same-thread mutex re-acquire that deadlocks
+	 * core ("deadlock ahead") under runtime concurrency (boot_fb blit
+	 * timer x storage chain, Phase 15). Arena exhaustion fails
+	 * allocations cleanly with OUT_OF_RAM instead of deadlocking.
+	 *
+	 * The arena must be a function-local static like the allocator
+	 * itself: a file-scope object's constructor does not run before
+	 * first use in core, leaving its vtable null.
+	 */
+	static Avl_metadata_arena avl_metadata_arena { };
+	static Phys_allocator phys_alloc_16k(&avl_metadata_arena);
 	return phys_alloc_16k;
 }
 

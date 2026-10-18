@@ -25,6 +25,8 @@
 #include <cnode.h>
 #include <untyped_memory.h>
 #include <thread_sel4.h>
+#include <platform_generic.h>
+#include <arch_kernel_object.h>
 
 /* base-internal includes */
 #include <base/internal/globals.h>
@@ -111,34 +113,65 @@ void Core::Platform::_init_allocators()
 
 	/* turn remaining untyped memory ranges into untyped pages */
 	_initial_untyped_pool.turn_into_untyped_object(Core_cspace::TOP_CNODE_UNTYPED_4K,
-		[&] (addr_t const phys, addr_t const size, bool const device_memory) {
+		[&] (Initial_untyped_pool::Range const &untyped, addr_t const phys, addr_t const size, bool const device_memory) {
 			/* register to physical or iomem memory allocator */
 
 			addr_t const phys_addr = trunc_page(phys);
 			size_t const phys_size = round_page(phys - phys_addr + size);
 
-			Hex_range const range { phys_addr, phys_size };
+			Hex_range const phys_range { phys_addr, phys_size };
 
 			if (_unused_phys_alloc.remove_range(phys_addr, phys_size).failed()) {
-				warning("failed to mark physical range as used: ", range);
+				warning("failed to mark physical range as used: ", phys_range);
 				return false;
 			}
 
 			if (device_memory) {
+				/*
+				 * Sponge (row 14): device memory above HIGH_PHYS_BASE
+				 * (8 GiB) cannot be eagerly converted to 4 KiB page-frame
+				 * caps in the flat phys CNode (the (phys_addr >> 12)
+				 * index overruns 2^21). Register it in _io_mem_alloc so
+				 * IO_MEM sessions for the range succeed, but return
+				 * false to skip the retyp. The page-frame caps will be
+				 * created lazily — on demand — in the dedicated high-
+				 * phys CNode (constructed on first use via
+				 * construct_high_phys_cnode). See docs/11 row 14.
+				 *
+				 * CRITICAL: add the WHOLE untyped in the first batch
+				 * only. The inner loop in turn_into_untyped_object
+				 * iterates the range in 64 KiB batches; adding each batch
+				 * individually to _io_mem_alloc would explode the AVL
+				 * tree with millions of entries (a single 32 GiB untyped
+				 * becomes ~500k 64 KiB nodes) and the boot hangs on the
+				 * cumulative O(n log n) work. We detect the first batch
+				 * via `untyped.free_offset == 0` and add the full untyped
+				 * range there. Subsequent batches are no-ops.
+				 */
+				if (phys_addr >= Core_cspace::HIGH_PHYS_BASE) {
+					if (untyped.free_offset == 0
+					    && _io_mem_alloc.add_range(untyped.phys, untyped.size).failed()) {
+						warning("failed to register I/O range: ", phys_range);
+						return false;
+					}
+					return false; /* skip retyp, range registered (or already was) */
+				}
+
 				if (_io_mem_alloc.add_range(phys_addr, phys_size).failed()) {
-					warning("failed to register I/O range: ", range);
+					warning("failed to register I/O range: ", phys_range);
 					return false;
 				}
+
 			} else {
 				if (_core_mem_alloc.phys_alloc().add_range(phys_addr, phys_size).failed()) {
-					warning("failed to register RAM range: ", range);
+					warning("failed to register RAM range: ", phys_range);
 					return false;
 				}
 			}
 
 			return true; /* range used by this functor */
 		},
-		[&] (addr_t const phys, addr_t const size, bool const device_memory) {
+		[&] (Initial_untyped_pool::Range const &, addr_t const phys, addr_t const size, bool const device_memory) {
 			/* revert region allocation if kernel denied to use it */
 
 			addr_t const phys_addr = trunc_page(phys);
@@ -147,6 +180,15 @@ void Core::Platform::_init_allocators()
 			Hex_range const range { phys_addr, phys_size };
 
 			if (device_memory) {
+				/*
+				 * Sponge (row 14): high-phys device memory was
+				 * registered (see functor above) but never retyped
+				 * (the (phys_addr >> 12) index would have overrun the
+				 * flat phys CNode). There is nothing to revoke here.
+				 */
+				if (phys_addr >= Core_cspace::HIGH_PHYS_BASE)
+					return;
+
 				if (_io_mem_alloc.remove_range(phys_addr, phys_size).failed()) {
 					warning("failed to remove I/O range: ", range);
 					return;
@@ -281,6 +323,11 @@ void Core::Platform::_switch_to_core_cspace()
 	_core_cnode.copy(initial_cspace, Cnode_index(Core_cspace::core_pad_cnode_sel()));
 	_core_cnode.copy(initial_cspace, Cnode_index(Core_cspace::core_cnode_sel()));
 	_core_cnode.copy(initial_cspace, Cnode_index(Core_cspace::phys_cnode_sel()));
+	/* Sponge (row 14 v2): the runtime flat selector of the high-phys
+	 * CNode resolves through the core CNode like the other static
+	 * CNodes — without this copy the address resolves to an empty slot
+	 * and every high-phys frame copy fails with "invalid source slot". */
+	_core_cnode.copy(initial_cspace, Cnode_index(Core_cspace::high_phys_cnode_sel()));
 
 	/*
 	 * Construct CNode hierarchy of core's CSpace
@@ -297,6 +344,18 @@ void Core::Platform::_switch_to_core_cspace()
 	/* insert 2nd-level phys-mem CNode into 1st-level CNode */
 	_top_cnode.copy(initial_cspace, Cnode_index(Core_cspace::phys_cnode_sel()),
 	                                Cnode_index(Core_cspace::TOP_CNODE_PHYS_IDX));
+
+	/*
+	 * Sponge (row 14 v2): insert the high-phys CNode (constructed as a
+	 * static member, see platform.h) into the 1st-level CNode. This MUST
+	 * happen here, inside _switch_to_core_cspace: afterwards
+	 * seL4_CapInitThreadCNode no longer resolves to the original initial
+	 * CNode, so a later copy cannot find the cap — the row-14 v1 lazy
+	 * construction failed exactly that way on the 17ZD90N.
+	 */
+	_top_cnode.copy(initial_cspace, Cnode_index(Core_cspace::high_phys_cnode_sel()),
+	                                Cnode_index(Core_cspace::TOP_CNODE_HIGH_PHYS_IDX));
+	Vm_space::_high_phys_cnode_ptr = &_high_phys_cnode;
 
 	/* insert 2nd-level untyped-pages CNode into 1st-level CNode */
 	_top_cnode.copy(initial_cspace, Cnode_index(Core_cspace::untyped_cnode_4k()),
@@ -647,8 +706,24 @@ Core::Platform::Platform()
 		error("setup of virtual memory space of core failed");
 
 	/* add some minor virtual region for dynamic usage by core */
-	addr_t const virt_size = 2 * _core_vm_space.max_page_frames() * PAGE_SIZE;
-	_unused_virt_alloc.alloc_aligned(virt_size, AT_PAGE).with_result(
+	{
+		/*
+		 * Sponge C2 (x86_64 only): with the enlarged vm_space (NUM_VM_SEL_LOG2
+		 * raised 15 -> 17), the raw computation 2*max_page_frames()*PAGE_SIZE
+		 * would reserve 1 GiB of core virtual address space and eagerly back
+		 * it with page tables during Platform() — this is what silently killed
+		 * Platform() in prior attempt C (p4-cspace-fix.log §4). Core's own
+		 * dynamic usage needs only the upstream 256 MiB; cap it there. Other
+		 * arches keep the upstream formula byte-for-byte.
+		 */
+#ifdef __x86_64__
+		addr_t const max_core_virt = 256UL * 1024 * 1024;
+		addr_t const virt_size = min(2UL * _core_vm_space.max_page_frames() * PAGE_SIZE,
+		                             max_core_virt);
+#else
+		addr_t const virt_size = 2 * _core_vm_space.max_page_frames() * PAGE_SIZE;
+#endif
+		_unused_virt_alloc.alloc_aligned(virt_size, AT_PAGE).with_result(
 
 		[&] (Range_allocator::Allocation &virt) {
 			addr_t const virt_addr = (addr_t)virt.ptr;
@@ -664,9 +739,10 @@ Core::Platform::Platform()
 			virt.deallocate = false;
 		},
 
-		[&] (Alloc_error) {
-			warning("failed to reserve core virtual memory for dynamic use"); }
+	[&] (Alloc_error) {
+		warning("failed to reserve core virtual memory for dynamic use"); }
 	);
+	} /* end Sponge C2 virt_size scope */
 
 	log("Physical memory per PD at most: ",
 	    Number_of_bytes(_core_vm_space.max_page_frames() * PAGE_SIZE));
@@ -747,6 +823,60 @@ unsigned Core::Platform::alloc_core_rcv_sel()
 void Core::Platform::reset_sel(unsigned sel)
 {
 	_core_cnode.remove(Cap_sel(sel));
+}
+
+
+/*
+ * Sponge (row 14): construct the high-phys CNode lazily, on first
+ * demand. Idempotent — returns true immediately on the second and
+ * later calls.
+ *
+ * Allocation strategy:
+ *   - the cap slot for the new CNode kobj is reserved at boot via
+ *     Core_cspace::high_phys_cnode_sel() (right after io_port_sel()
+ *     in the initial thread CNode's empty-slot range), so no selector
+ *     allocation is needed at runtime;
+ *   - allocate 512 KiB of contiguous backing from the 16 KiB untyped
+ *     pool (Cnode_kobj::SIZE_LOG2 = 5 on 64-bit, so
+ *     backing_log2 = 5 + NUM_HIGH_PHYS_SEL_LOG2 = 19); the v1 design
+ *     needed 256 MiB (2^23 slots) which the 16 KiB pool cannot supply
+ *     on the Insyde-fragmented 17ZD90N memory map — the v2 sequential
+ *     slot scheme needs only 2^14 slots;
+ *   - the CNode constructor in cnode.h handles the kernel-side
+ *     retypage of the CNode kobj into the initial thread CNode at
+ *     high_phys_cnode_sel();
+ *   - copy the new CNode cap into the top CNode at slot
+ *     TOP_CNODE_HIGH_PHYS_IDX (0x7e0) so the kernel resolves
+ *     high_phys_cnode_sel() to the new CNode;
+ *   - publish the constructed CNode pointer to Vm_space's static
+ *     member so Vm_space::_map_frame can find the source CNode for
+ *     high-phys pages (read with a normal memory load, not via
+ *     platform_specific() — the platform_specific() alternative was
+ *     observed to hang the boot).
+ *
+ * Returns false if the 16K pool has no contiguous 512 KiB region;
+ * the caller logs and returns an error to the IO_MEM session.
+ */
+/*
+ * Sponge (row 14 v2): the CNode is constructed early (as a Platform
+ * member, like the other static CNodes — see platform.h) and published
+ * into the top CNode in _init_allocators(). This entry point, called
+ * from the IO_MEM session path, only reports whether that early
+ * construction succeeded; on failure the IO_MEM session fails cleanly
+ * with "not available" — no crash.
+ */
+/*
+ * Sponge (row 14 v2): the CNode is constructed early (as a Platform
+ * member, like the other static CNodes — see platform.h) and published
+ * into the top CNode in _switch_to_core_cspace(). The pool-based CNode
+ * ctor has no success query (_phys is only set by the other ctor
+ * variant), so there is nothing to check here — a construction failure
+ * would already have printed "leaking untyped" at boot, and a missing
+ * cap makes the frame retype fail with its own clear error.
+ */
+bool Core::Platform::construct_high_phys_cnode()
+{
+	return true;
 }
 
 
