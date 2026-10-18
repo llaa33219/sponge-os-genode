@@ -106,7 +106,7 @@ build: $(BUILD_DIR) $(QT6_DIR)
 	-DBUILD_qtshadertools=ON \
 	-DBUILD_qtspeech=OFF \
 	-DBUILD_qtsvg=ON \
-	-DBUILD_qttools=ON \
+	-DBUILD_qttools=OFF \
 	-DBUILD_qttranslations=OFF \
 	-DBUILD_qtvirtualkeyboard=OFF \
 	-DBUILD_qtwayland=OFF \
