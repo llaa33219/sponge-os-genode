@@ -1,0 +1,93 @@
+--- src/kernel/sel4/include/kernel/boot.h
++++ src/kernel/sel4/include/kernel/boot.h
+@@ -28,6 +28,7 @@
+     region_t   freemem[MAX_NUM_FREEMEM_REG];
+     seL4_BootInfo      *bi_frame;
+     seL4_SlotPos slot_pos_cur;
++    paddr_t highest_map_addr;
+ } ndks_boot_t;
+ 
+ extern ndks_boot_t ndks_boot;
+--- src/kernel/sel4/src/kernel/boot.c
++++ src/kernel/sel4/src/kernel/boot.c
+@@ -808,20 +808,55 @@
+         start = ndks_boot.reserved[i].end;
+     }
+ 
+-    if (start <= CONFIG_PADDR_USER_DEVICE_TOP - 1) {
+-        region_t reg = paddr_to_pptr_reg((p_region_t) {
+-            /* CONFIG_PADDR_USER_DEVICE_TOP cast to paddr_t can be 0.
+-             * create_untypeds_for_region() can deal with that correctly. */
+-            start, (paddr_t) CONFIG_PADDR_USER_DEVICE_TOP
+-        });
++    /*
++     * Sponge OS Phase 15 W4 (row 13 patch): replace the single
++     * trailing device region [start, CONFIG_PADDR_USER_DEVICE_TOP)
++     * with a LOW + HIGH split keyed on the highest memory-map
++     * address, so high MMIO (GOP framebuffers at 0x4000000000+,
++     * 64-bit PCI BARs in the q35 pci-hole64) is covered within the
++     * bootinfo untyped-cap budget.
++     *
++     * LOW = [ROUND_UP(start, 31), ROUND_UP(highest_map_addr, 21))
++     *   2-GiB-aligned start keeps per-untyped size at 2 GiB instead
++     *   of 32 MiB, so 1-4 untypeds cover the LAPIC/IO-APIC/HPET
++     *   block at ~4 GiB.
++     * HIGH = [ROUND_UP(highest_map_addr, 21), SPONGE_DEVICE_UNTYPED_TOP)
++     *   1 TiB ceiling; device untypeds sized at the start alignment
++     *   so 1-127 untypeds cover every practical GOP framebuffer
++     *   above the map.
++     */
++#define SPONGE_DEVICE_UNTYPED_TOP  ((paddr_t)1ULL << 40)
++    {
++        paddr_t const low_start  = (start + BIT(31) - 1) & ~((paddr_t)BIT(31) - 1);
++        paddr_t const low_end    = (ndks_boot.highest_map_addr + BIT(21) - 1)
++                                   & ~((paddr_t)BIT(21) - 1);
++        paddr_t const high_end   = SPONGE_DEVICE_UNTYPED_TOP;
++
++        if (low_start < low_end) {
++            region_t reg = paddr_to_pptr_reg((p_region_t) {
++                low_start, low_end
++            });
++            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
++                printf("ERROR: creation of untypeds for LOW device region"
++                       " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word") failed\n",
++                       reg.start, reg.end);
++                return false;
++            }
++        }
+ 
+-        if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
+-            printf("ERROR: creation of untypeds for top device region"
+-                   " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word") failed\n",
+-                   reg.start, reg.end);
+-            return false;
++        if (low_end < high_end) {
++            region_t reg = paddr_to_pptr_reg((p_region_t) {
++                low_end, high_end
++            });
++            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
++                printf("ERROR: creation of untypeds for HIGH device region"
++                       " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word") failed\n",
++                       reg.start, reg.end);
++                return false;
++            }
+         }
+     }
++#undef SPONGE_DEVICE_UNTYPED_TOP
+ 
+     /* There is a part of the kernel (code/data) that is only needed for the
+      * boot process. We can create UT objects for these frames, so the memory
+@@ -884,6 +919,13 @@
+         const p_region_t *r = &available[i];
+         printf("  [%"SEL4_PRIx_word"..%"SEL4_PRIx_word")\n", r->start, r->end);
+ 
++        /* Sponge OS Phase 15 W4 (row 13 patch): capture the highest
++         * memory-map address for the device-untyped HIGH split in
++         * create_untypeds(). */
++        if (r->end > ndks_boot.highest_map_addr) {
++            ndks_boot.highest_map_addr = r->end;
++        }
++
+         /* Available regions must not wrap */
+         if (r->start > r->end) {
+             printf("ERROR: memory region %"SEL4_PRIu_word" has start > end\n", i);

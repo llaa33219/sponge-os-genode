@@ -1,0 +1,35 @@
+--- src/kernel/sel4/src/arch/x86/kernel/boot.c
++++ src/kernel/sel4/src/arch/x86/kernel/boot.c
+@@ -155,6 +155,32 @@
+         return false;
+     }
+ 
++    /*
++     * Sponge OS (row 11 core-side): export the kernel+rootserver
++     * reserved extent as a synthetic entry in the multiboot mmap
++     * bootinfo chunk. The region [KERNEL_ELF_PADDR_BASE, ui end)
++     * covers the kernel image, the boot-module blob, and the copied
++     * rootserver image; init_freemem subtracts it from the available
++     * regions, but its region-subtraction loop can leak avail
++     * fragments overlapping this extent on fragmented maps (the
++     * artifacts surface as RAM untypeds over reserved memory).
++     * Userland (Genode core) reads this entry to skip the leaked
++     * artifacts itself — the kernel only exports the fact, all
++     * policy lives in userland. Under multiboot2 the chunk is
++     * otherwise left empty (only the multiboot1 parser fills it).
++     */
++    if (mb_mmap->mmap_length + sizeof(seL4_X86_mb_mmap_t)
++        <= sizeof(mb_mmap->mmap)) {
++        seL4_X86_mb_mmap_t *entry = (seL4_X86_mb_mmap_t *)
++            ((word_t)&mb_mmap->mmap[0] + mb_mmap->mmap_length);
++        entry->size      = sizeof(seL4_X86_mb_mmap_t) - sizeof(entry->size);
++        entry->base_addr = (uint64_t)KERNEL_ELF_PADDR_BASE;
++        entry->length    = (uint64_t)ui_info.p_reg.end
++                           - (uint64_t)KERNEL_ELF_PADDR_BASE;
++        entry->type      = 2; /* multiboot: reserved */
++        mb_mmap->mmap_length += sizeof(seL4_X86_mb_mmap_t);
++    }
++
+     /* create the root cnode */
+     root_cnode_cap = create_root_cnode();
+ 
