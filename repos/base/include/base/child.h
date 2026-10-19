@@ -339,6 +339,21 @@ class Genode::Child : protected Rpc_object<Parent>,
 		/* number of unanswered heartbeat signals */
 		unsigned _outstanding_heartbeats = 0;
 
+		/*
+		 * Sticky flag: the child has answered at least one heartbeat since
+		 * it registered its heartbeat signal handler.
+		 *
+		 * A child that has never answered is not necessarily wedged - it
+		 * may still be inside its first 'Component::construct()'. In the
+		 * classic (non-pthread) Genode, the constructor RPC is executed by
+		 * the entrypoint thread, so a construct that blocks - loading
+		 * shared libraries over a slow storage chain, for instance -
+		 * also blocks the processing of the heartbeat signal. The parent
+		 * cannot tell "starting" from "wedged" by looking at the skip
+		 * count alone; this flag is the difference.
+		 */
+		bool _heartbeat_responded = false;
+
 		/* sessions opened by the child */
 		Id_space<Client> _id_space { };
 
@@ -811,6 +826,25 @@ class Genode::Child : protected Rpc_object<Parent>,
 		 * the child
 		 */
 		unsigned skipped_heartbeats() const;
+
+		/**
+		 * Return true if the child has registered a heartbeat signal
+		 * handler
+		 *
+		 * Only such a child is asked for heartbeats at all, so this is
+		 * the condition under which a missing heartbeat response is
+		 * meaningful.
+		 */
+		bool heartbeat_monitored() const { return _heartbeat_sigh.valid(); }
+
+		/**
+		 * Return true if the child has answered at least one heartbeat
+		 *
+		 * A child that has never answered is still STARTING (its
+		 * entrypoint is busy in its first construct); a child that
+		 * answered before and stopped answering is WEDGED.
+		 */
+		bool heartbeat_responded() const { return _heartbeat_responded; }
 
 
 		/**********************

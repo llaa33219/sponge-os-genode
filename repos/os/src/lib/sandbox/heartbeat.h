@@ -36,18 +36,28 @@ class Sandbox::Heartbeat : Noncopyable
 
 		uint64_t _rate_ms = 0;
 
+		/*
+		 * Milliseconds elapsed since the heartbeat timer was armed. The
+		 * sandbox has no wall clock of its own, so the heartbeat period is
+		 * the clock: the startup grace of a child is measured in heartbeat
+		 * periods.
+		 */
+		uint64_t _elapsed_ms = 0;
+
 		Signal_handler<Heartbeat> _timer_handler;
 
 		void _handle_timer()
 		{
 			bool any_skipped_heartbeats = false;
 
+			_elapsed_ms += _rate_ms;
+
 			_children.for_each_child([&] (Child &child) {
 
 				if (child.skipped_heartbeats())
 					any_skipped_heartbeats = true;
 
-				child.heartbeat();
+				child.heartbeat((unsigned)_elapsed_ms, (unsigned)_rate_ms);
 			});
 
 			if (any_skipped_heartbeats)

@@ -389,6 +389,17 @@ void Sandbox::Child::report_state(Generator &g, Report_detail const &detail) con
 		if (_heartbeat.enabled && _child.skipped_heartbeats())
 			g.attribute("skipped_heartbeats", _child.skipped_heartbeats());
 
+		/*
+		 * A child that has registered its heartbeat handler but has not
+		 * answered a single heartbeat is STARTING, not wedged. The
+		 * attribute lets a supervisor above this sandbox tell the two
+		 * apart instead of reading a rising skip count of a child that is
+		 * merely slow to come up.
+		 */
+		if (_heartbeat.enabled && _child.heartbeat_monitored() &&
+		    !_child.heartbeat_responded())
+			g.attribute("heartbeat_state", "starting");
+
 		g.tabular([&] {
 
 			if (!detail.child_ram() && !detail.child_caps())

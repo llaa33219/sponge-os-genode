@@ -113,6 +113,8 @@ schema config
 
   + node heartbeat | multiple: no
     + attr restart_after_skipped | type: natural | default: 0
+    + attr restart_budget | type: natural | default: 0
+    + attr startup_grace_ms | type: natural | default: 0
 
   + node affinity | multiple: no
     + attr xpos   | type: natural  | default: 0

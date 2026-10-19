@@ -793,7 +793,11 @@ void Child::heartbeat_sigh(Signal_context_capability sigh)
 }
 
 
-void Child::heartbeat_response() { _outstanding_heartbeats = 0; }
+void Child::heartbeat_response()
+{
+	_outstanding_heartbeats = 0;
+	_heartbeat_responded  = true;
+}
 
 
 void Child::_try_construct_env_dependent_members()

@@ -210,6 +210,7 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 			bool     enabled;
 			unsigned restart_after_skipped;
 			unsigned restart_budget;
+			unsigned startup_grace_ms;
 
 			static Heartbeat from_start_node(Node const &node)
 			{
@@ -217,7 +218,8 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 					[&] (Node const &node) -> Heartbeat {
 						return { true,
 						         node.attribute_value("restart_after_skipped", 0u),
-						         node.attribute_value("restart_budget", 0u) }; },
+						         node.attribute_value("restart_budget", 0u),
+						         node.attribute_value("startup_grace_ms", 0u) }; },
 					[&] {
 						return Heartbeat { }; });
 			}
@@ -265,6 +267,25 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 		unsigned _restart_count = 0;
 		bool     _restart_budget_reported = false;
 		bool     _restart_budget_announced = false;
+
+		/*
+		 * STARTUP classification. A child that has registered its heartbeat
+		 * handler but has not answered a single heartbeat is not wedged: it
+		 * is inside its first 'Component::construct()', which in the
+		 * classic Genode runs on the very thread that has to process the
+		 * heartbeat signal. A construct that takes longer than the
+		 * heartbeat budget - loading Qt6/Mesa shared libraries over a slow
+		 * storage chain, for instance - therefore looks exactly like a
+		 * wedge to the parent.
+		 *
+		 * 'startup_grace_ms' is the bounded window in which such a child
+		 * is given the benefit of the doubt. It is opt-in per <start> node
+		 * and 0 (the default) keeps the upstream behaviour.
+		 */
+		bool     _startup_seen          { false };
+		bool     _startup_reported      { false };
+		bool     _startup_wedge_pending { false };
+		unsigned _startup_since_ms      { 0 };
 
 		/* return true if heartbeat tracking is active */
 		bool _heartbeat_expected() const
@@ -724,16 +745,90 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 		void apply_upgrade();
 		void apply_downgrade();
 
-		void heartbeat()
+		void heartbeat(unsigned now_ms, unsigned rate_ms)
 		{
 			if (_heartbeat_expected())
 				_child.heartbeat();
 
 			unsigned const skipped_heartbeats = _child.skipped_heartbeats();
 
-			if (_last_skipped_heartbeats != skipped_heartbeats) {
+			bool const skip_changed = (_last_skipped_heartbeats != skipped_heartbeats);
+
+			/*
+			 * The heartbeat budget: the child is killed when the skip
+			 * count EXCEEDS 'restart_after_skipped'. The skip count is
+			 * one behind the number of unanswered heartbeats (the first
+			 * one is still within its period), so the kill lands on the
+			 * (restart_after_skipped + 2)-th unanswered heartbeat - 10 s
+			 * at rate 2000 ms with restart_after_skipped 3.
+			 */
+			unsigned const budget_ms =
+				(_heartbeat.restart_after_skipped + 2) * rate_ms;
+
+			/*
+			 * The child has become responsive. If it was still counted as
+			 * STARTING, this is the moment its startup ended - and the
+			 * only place where the duration of that startup is known.
+			 */
+			if (_startup_seen && !_startup_reported &&
+			    _child.heartbeat_responded())
+			{
+				_startup_reported = true;
+
+				unsigned const startup_ms = now_ms - _startup_since_ms;
+
+				if (budget_ms && startup_ms >= budget_ms) {
+					warning(name(),
+					        ": startup took ", startup_ms,
+					        " ms - the heartbeat budget (", budget_ms,
+					        " ms) would have killed it, the startup grace (",
+					        _heartbeat.startup_grace_ms, " ms) applied");
+				}
+			}
+
+			/*
+			 * CLASSIFICATION. A child that has registered its heartbeat
+			 * handler but has not answered a SINGLE heartbeat is not
+			 * wedged - it is inside its first construct, which runs on
+			 * the very thread that has to process the heartbeat signal.
+			 * Such a child is given a bounded startup grace; the skip
+			 * count is still reported (the state stays truthful), but it
+			 * does not trigger a restart.
+			 */
+			if (_heartbeat.enabled && _heartbeat.startup_grace_ms &&
+			    _child.heartbeat_monitored() && !_child.heartbeat_responded())
+			{
+				if (!_startup_seen) {
+					_startup_seen     = true;
+					_startup_since_ms = now_ms;
+				}
+
+				unsigned const startup_ms = now_ms - _startup_since_ms;
+
+				if (startup_ms < _heartbeat.startup_grace_ms) {
+
+					if (skip_changed) {
+						_last_skipped_heartbeats = skipped_heartbeats;
+						_report_update_trigger.trigger_report_update();
+					}
+					return;
+				}
+
+				if (!_startup_wedge_pending) {
+					_startup_wedge_pending = true;
+					warning(name(),
+					        ": no heartbeat response after ", startup_ms,
+					        " ms - the startup grace (",
+					        _heartbeat.startup_grace_ms,
+					        " ms) is exhausted, treating the child as wedged");
+				}
+			}
+
+			if (skip_changed || _startup_wedge_pending) {
 
 				if (_heartbeat.restart_needed(skipped_heartbeats)) {
+
+					_startup_wedge_pending = false;
 
 					if (_heartbeat.restart_allowed(_restart_count)) {
 						_restart_count++;
@@ -758,7 +853,8 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 					}
 				}
 
-				_report_update_trigger.trigger_report_update();
+				if (skip_changed)
+					_report_update_trigger.trigger_report_update();
 			}
 
 			/* The child recovered WITHIN this incarnation - a fresh
