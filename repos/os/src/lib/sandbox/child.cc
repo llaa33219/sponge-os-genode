@@ -762,53 +762,99 @@ void Sandbox::Child::resource_request(Parent::Resource_args const &args)
 {
 	log("child \"", name(), "\" requests resources: ", args);
 
+	Ram_quota const req_ram  { ram_quota_from_args(args.string()) };
+	Cap_quota const req_caps { cap_quota_from_args(args.string()) };
+
 	/*
-	 * Answer the request immediately from our own remaining quota.
+	 * Answer the request immediately from our own quota.
 	 *
 	 * Upstream defers the answer to the next config application
 	 * (apply_config -> apply_upgrade), expecting an operator to
 	 * react to the state report. In a self-contained system (the
 	 * product media: the top-level init has no operator and its
 	 * config never changes at runtime), a deferred answer is a
-	 * permanent one: the requesting child — typically the vfs
-	 * hosting the whole disk-backed /system — blocks forever and
+	 * permanent one: the requesting child - typically the vfs
+	 * hosting the whole disk-backed /system - never resumes and
 	 * every component behind it freezes (the C:0/W:1 launch
-	 * failure). Transfer the requested amount right away when our
-	 * PD still has slack; the quota limits in the config remain
-	 * the authority (a request beyond them still waits for a
-	 * config change, preserving the control escape hatch).
+	 * failure).
+	 *
+	 * The grant must move quota the way '_apply_resource_upgrade'
+	 * moves it: raise the child's ASSIGNED quota (bounded by the
+	 * configured quota - the config stays the authority, preserving
+	 * the control escape hatch - and by our own limit), then
+	 * 'ref_account().transfer_quota(child_pd, ...)', i.e. from OUR
+	 * account into the child's LIMIT.
+	 *
+	 * It must NOT be 'child_pd.transfer_quota(ref_account_cap(),
+	 * ...)': that call is bounded by the CHILD's own unassigned
+	 * quota, which is exactly what ran out and prompted the
+	 * request, so it returns EXCEEDED no matter how much slack we
+	 * hold. Doing that and reporting success anyway turned every
+	 * such request into an unbounded upgrade-retry loop between the
+	 * child and this sandbox's main entrypoint - a permanent, silent
+	 * wedge (see docs/evidence/sponge-quota-deadlock.md).
 	 */
 	{
-		Ram_quota const req_ram  { ram_quota_from_args(args.string()) };
-		Cap_quota const req_caps { cap_quota_from_args(args.string()) };
+		Configured_quota const configured = _configured_quota();
+		Assigned_quota       &assigned    = _resources.assigned_quota;
+		Quota_limit          const limit   = _quota_limit_accessor.quota_limit();
 
-		Genode::uint64_t const avail_ram  = _env.pd().stats().ram.avail().value;
-		Genode::uint64_t const avail_caps = _env.pd().stats().caps.avail().value;
+		auto grantable = [] (size_t req, size_t conf, size_t asgn, size_t lim) {
+			size_t const headroom = (conf > asgn) ? conf - asgn : 0;
+			return min(min(req, headroom), lim);
+		};
 
-		bool const ram_satisfiable  = (req_ram.value  == 0) || (avail_ram  >= req_ram.value  + 4096);
-		bool const caps_satisfiable = (req_caps.value == 0) || (avail_caps >= req_caps.value + 8);
+		size_t const ram  = grantable(req_ram.value,  configured.ram.value,
+		                              assigned.ram.value,  limit.ram.value);
+		size_t const caps = grantable(req_caps.value, configured.caps.value,
+		                              assigned.caps.value, limit.caps.value);
 
-		if (ram_satisfiable && caps_satisfiable) {
-			_with_pd([&] (Pd_session &pd) {
-				auto const OK = Pd_account::Transfer_result::OK;
-				if (req_ram.value &&
-				    pd.transfer_quota(ref_account_cap(), req_ram) != OK)
-					warning(name(), ": immediate ram grant failed");
-				if (req_caps.value &&
-				    pd.transfer_quota(ref_account_cap(), req_caps) != OK)
-					warning(name(), ": immediate caps grant failed");
-			});
+		if (ram || caps) {
 
-			_resources.assigned_quota.ram.value  += req_ram.value;
-			_resources.assigned_quota.caps.value += req_caps.value;
+			bool ram_ok = true, caps_ok = true;
 
-			log("child \"", name(), "\": resource request granted immediately");
-			_child.notify_resource_avail();
-			return;
+			if (ram) {
+				assigned.ram.value += ram;
+				ram_ok = (ref_account().transfer_quota(_child.pd_session_cap(),
+				                                      Ram_quota{ram})
+				          != Pd_session::Transfer_result::EXCEEDED);
+				if (!ram_ok)
+					assigned.ram.value -= ram;
+			}
+
+			if (caps) {
+				assigned.caps.value += caps;
+				caps_ok = (ref_account().transfer_quota(_child.pd_session_cap(),
+				                                      Cap_quota{caps})
+				           != Pd_session::Transfer_result::EXCEEDED);
+				if (!caps_ok)
+					assigned.caps.value -= caps;
+			}
+
+			/* only a grant that actually moved quota counts as a grant */
+			if (ram_ok && caps_ok) {
+				log("child \"", name(), "\": resource request granted immediately "
+				    "(ram=", ram, ", caps=", caps, ")");
+				_child.notify_resource_avail();
+				return;
+			}
+
+			warning(name(), ": immediate resource grant failed (ram=", ram,
+			        ", caps=", caps, ")");
 		}
 
-		warning(name(), ": resource request deferred (insufficient slack), "
-		                "waiting for a config change");
+		/*
+		 * The request could not be served from our own quota. Say what
+		 * is missing and who is entitled to provide it, instead of
+		 * deferring in silence: a deferred request in a system nobody
+		 * reconfigures is indistinguishable from a dead system.
+		 */
+		log("child \"", name(), "\": resource request NOT granted "
+		    "(requested ram=", req_ram.value, "/caps=", req_caps.value,
+		    ", assigned ram=", assigned.ram.value, "/caps=", assigned.caps.value,
+		    ", configured ram=", configured.ram.value, "/caps=", configured.caps.value,
+		    ", our slack ram=", limit.ram.value, "/caps=", limit.caps.value,
+		    ") - deferring to the next config application");
 	}
 
 	_requested_resources.construct(args);

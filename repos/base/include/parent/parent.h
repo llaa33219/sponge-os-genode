@@ -87,6 +87,23 @@ class Genode::Parent
 		 */
 		using Resource_args = String<160>;
 
+		/**
+		 * Number of quota-upgrade attempts a client may spend on a single
+		 * allocation
+		 *
+		 * The protocol carries no "denied" answer for 'upgrade', so a client
+		 * cannot distinguish "parent will grant this shortly" from "parent
+		 * will never grant this". Retrying forever turns the second case into
+		 * an unbounded RPC loop against the parent's request-handling
+		 * entrypoint, which is shared with every other child of that parent.
+		 *
+		 * One attempt corresponds to one requested quota increase, so a
+		 * legitimate burst needs one attempt per increase. Exhausting the
+		 * budget means the request is structurally unsatisfiable; the client
+		 * reports it and stops instead of spinning.
+		 */
+		enum { UPGRADE_ATTEMPTS = 64U };
+
 		virtual ~Parent() { }
 
 		/**

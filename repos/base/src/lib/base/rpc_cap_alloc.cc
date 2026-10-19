@@ -42,7 +42,7 @@ void Genode::init_rpc_cap_alloc(Parent &parent) { _parent_ptr = &parent; }
 Rpc_entrypoint::Alloc_rpc_cap_result
 Rpc_entrypoint::_alloc_rpc_cap(Runtime &runtime, Native_capability, addr_t)
 {
-	for (;;) {
+	for (unsigned attempts = 0; ; attempts++) {
 
 		Ram_quota ram_upgrade { 0 };
 		Cap_quota cap_upgrade { 0 };
@@ -63,6 +63,14 @@ Rpc_entrypoint::_alloc_rpc_cap(Runtime &runtime, Native_capability, addr_t)
 
 		if (result.valid())
 			return result;
+
+		if (attempts == Parent::UPGRADE_ATTEMPTS) {
+			error("RPC-cap allocation not granted after ", attempts,
+			      " quota-upgrade attempts (", ram_upgrade, " bytes, ",
+			      cap_upgrade, " caps) - the parent does not grant this "
+			      "quota; stopping instead of requesting forever");
+			sleep_forever();
+		}
 
 		_parent().upgrade(Parent::Env::pd(),
 		                  String<100>("ram_quota=", ram_upgrade, ", "

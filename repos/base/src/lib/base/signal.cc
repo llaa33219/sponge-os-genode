@@ -233,7 +233,7 @@ Signal_context_capability Signal_receiver::manage(Signal_context &context)
 	/* register context at process-wide registry */
 	signal_context_registry()->insert(&context._registry_le);
 
-	for (;;) {
+	for (unsigned attempts = 0; ; attempts++) {
 
 		Ram_quota ram_upgrade { 0 };
 		Cap_quota cap_upgrade { 0 };
@@ -260,6 +260,15 @@ Signal_context_capability Signal_receiver::manage(Signal_context &context)
 
 		if (context._cap.valid())
 			break;
+
+		if (attempts == Parent::UPGRADE_ATTEMPTS) {
+			error("signal-context allocation not granted after ", attempts,
+			      " quota-upgrade attempts (", ram_upgrade, " bytes, ",
+			      cap_upgrade, " caps) - the parent does not grant this "
+			      "quota; stopping instead of requesting forever");
+			sleep_forever();
+			break;
+		}
 
 		log("upgrading quota donation for PD session "
 		    "(", ram_upgrade, " bytes, ", cap_upgrade, " caps)");

@@ -41,7 +41,7 @@ struct File_system::Connection : Genode::Connection<Session>, Session_client
 	 */
 	auto _retry(auto const &fn) -> decltype(fn())
 	{
-		enum { UPGRADE_ATTEMPTS = ~0U };
+		enum { UPGRADE_ATTEMPTS = Genode::Parent::UPGRADE_ATTEMPTS };
 		return Genode::retry<Out_of_ram>(
 			[&] () {
 				return Genode::retry<Out_of_caps>(

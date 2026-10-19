@@ -73,7 +73,7 @@ class Genode::Connection_base : Noncopyable, Interface
 		 */
 		auto retry_with_upgrade(Ram_quota ram, Cap_quota caps, auto const &fn) -> decltype(fn())
 		{
-			enum { UPGRADE_ATTEMPTS = ~0U };
+			enum { UPGRADE_ATTEMPTS = Parent::UPGRADE_ATTEMPTS };
 			return Genode::retry<Out_of_ram>(
 				[&] {
 					return Genode::retry<Out_of_caps>(

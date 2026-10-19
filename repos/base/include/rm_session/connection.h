@@ -36,7 +36,18 @@ struct Genode::Rm_connection : Connection<Rm_session>
 	Capability<Region_map> create(size_t size)
 	{
 		Capability<Region_map> result { };
-		for (bool denied = false; !denied && !result.valid(); )
+		bool denied = false;
+
+		for (unsigned attempts = 0; !denied && !result.valid(); attempts++) {
+
+			if (attempts == Parent::UPGRADE_ATTEMPTS) {
+				error("region-map creation of ", size, " bytes not granted after ",
+				      attempts, " quota-upgrade attempts - the parent does not "
+				      "grant this quota; stopping instead of requesting forever");
+				sleep_forever();
+				break;
+			}
+
 			_client.create(size).with_result(
 				[&] (Capability<Region_map> cap) { result = cap; },
 				[&] (Alloc_error e) {
@@ -48,6 +59,7 @@ struct Genode::Rm_connection : Connection<Rm_session>
 						denied = true;
 					}
 				});
+		}
 		return result;
 	}
 
