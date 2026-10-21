@@ -98,10 +98,6 @@ class Libc::Env_implementation : public Libc::Env
 		             Parent::Upgrade_args const &args) override {
 			return _env.upgrade(id, args); }
 
-		Parent::Upgrade_result try_upgrade(Parent::Client::Id id,
-		                                   Parent::Upgrade_args const &args) override {
-			return _env.try_upgrade(id, args); }
-
 		void close(Parent::Client::Id id) override {
 			return _env.close(id); }
 
