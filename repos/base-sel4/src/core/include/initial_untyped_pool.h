@@ -459,7 +459,10 @@ class Core::Initial_untyped_pool
 
 					if (ret != 0) {
 						error("turn_into_untyped_object : "
-						      "seL4_Untyped_Retype (untyped) returned ", ret);
+						      "seL4_Untyped_Retype (untyped) returned ", ret,
+						      " range ", Hex_range<addr_t>(range.phys, range.size),
+						      " free_offset ", Hex(range.free_offset),
+						      " device ", range.device);
 						fn_revert(range, phys_addr, num_pages << size_log2, range.device);
 						return false;
 					}

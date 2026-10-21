@@ -1,0 +1,156 @@
+--- src/kernel/sel4/src/kernel/boot.c
++++ src/kernel/sel4/src/kernel/boot.c
+@@ -745,7 +745,8 @@
+     cap_t      root_cnode_cap,
+     bool_t     device_memory,
+     region_t   reg,
+-    seL4_SlotPos first_untyped_slot
++    seL4_SlotPos first_untyped_slot,
++    word_t     max_size_bits
+ )
+ {
+     /* This code works with regions that wrap (where end < start), because the loop cuts up the
+@@ -764,6 +765,17 @@
+         if (size_bits > seL4_MaxUntypedBits) {
+             size_bits = seL4_MaxUntypedBits;
+         }
++        /* Sponge OS (ledger row 28): the caller may cap the untyped size.
++         * A device untyped's free index is a single monotonic watermark:
++         * every object retyped from it is created at the watermark, so
++         * two device windows inside the SAME untyped can only be placed
++         * in increasing address order. The high-MMIO ladder therefore
++         * uses a uniform grid (see create_untypeds) so that device
++         * windows far apart get independent untypeds.
++         */
++        if (max_size_bits && size_bits > max_size_bits) {
++            size_bits = max_size_bits;
++        }
+         /* The start address 0 satisfies any alignment needs, otherwise ensure
+          * the region's bit size does not exceed the alignment of the region.
+          */
+@@ -797,7 +809,7 @@
+             region_t reg = paddr_to_pptr_reg((p_region_t) {
+                 start, ndks_boot.reserved[i].start
+             });
+-            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
++            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot, 0)) {
+                 printf("ERROR: creation of untypeds for device region #%u at"
+                        " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word") failed\n",
+                        (unsigned int)i, reg.start, reg.end);
+@@ -836,7 +848,7 @@
+             region_t reg = paddr_to_pptr_reg((p_region_t) {
+                 low_start, low_end
+             });
+-            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
++            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot, 0)) {
+                 printf("ERROR: creation of untypeds for LOW device region"
+                        " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word") failed\n",
+                        reg.start, reg.end);
+@@ -844,17 +856,50 @@
+             }
+         }
+ 
+-        if (low_end < high_end) {
++        /*
++         * Sponge OS (ledger row 28): the HIGH region is covered by a
++         * UNIFORM grid of device untypeds (64 GiB each) above the first
++         * grid point, with the doubling ladder only filling the gap
++         * between the memory map and that grid point.
++         *
++         * Why a grid: a device untyped carries one monotonic free index
++         * (the watermark at which the next retyped object is created).
++         * Two device windows inside the same untyped can therefore only
++         * be placed in increasing address order - the second one would
++         * land below the watermark. The LG gram 17ZD90N has exactly
++         * that shape: its GOP framebuffer at 0x4000000000 (256 GiB) and
++         * its PCH xHCI BAR at 0x601d140000 (~384.5 GiB) are 128 GiB
++         * apart, and the xHCI (Tier-0) is mapped long before the
++         * display driver (driver_runtime) asks for the framebuffer. A
++         * 64 GiB grid puts the two windows into independent untypeds, so
++         * their order no longer matters. 1 TiB / 64 GiB = 16 untypeds,
++         * which fits the bootinfo budget (CONFIG_MAX_NUM_BOOTINFO_UNTYPED_CAPS).
++         */
++        paddr_t const grid_start = (low_end + BIT(36) - 1) & ~((paddr_t)BIT(36) - 1);
++
++        if (low_end < grid_start) {
+             region_t reg = paddr_to_pptr_reg((p_region_t) {
+-                low_end, high_end
++                low_end, grid_start
+             });
+-            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot)) {
++            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot, 0)) {
+                 printf("ERROR: creation of untypeds for HIGH device region"
+                        " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word") failed\n",
+                        reg.start, reg.end);
+                 return false;
+             }
+         }
++
++        if (grid_start < high_end) {
++            region_t reg = paddr_to_pptr_reg((p_region_t) {
++                grid_start, high_end
++            });
++            if (!create_untypeds_for_region(root_cnode_cap, true, reg, first_untyped_slot, 36)) {
++                printf("ERROR: creation of untypeds for GRID device region"
++                       " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word") failed\n",
++                       reg.start, reg.end);
++                return false;
++            }
++        }
+     }
+ #undef SPONGE_DEVICE_UNTYPED_TOP
+ 
+@@ -863,7 +908,7 @@
+      * can be reused.
+      */
+     region_t boot_mem_reuse_reg = paddr_to_pptr_reg(get_p_reg_kernel_img_boot());
+-    if (!create_untypeds_for_region(root_cnode_cap, false, boot_mem_reuse_reg, first_untyped_slot)) {
++    if (!create_untypeds_for_region(root_cnode_cap, false, boot_mem_reuse_reg, first_untyped_slot, 0)) {
+         printf("ERROR: creation of untypeds for recycled boot memory"
+                " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word"] failed\n",
+                boot_mem_reuse_reg.start, boot_mem_reuse_reg.end);
+@@ -874,7 +919,7 @@
+     for (word_t i = 0; i < ARRAY_SIZE(ndks_boot.freemem); i++) {
+         region_t reg = ndks_boot.freemem[i];
+         ndks_boot.freemem[i] = REG_EMPTY;
+-        if (!create_untypeds_for_region(root_cnode_cap, false, reg, first_untyped_slot)) {
++        if (!create_untypeds_for_region(root_cnode_cap, false, reg, first_untyped_slot, 0)) {
+             printf("ERROR: creation of untypeds for free memory region #%u at"
+                    " [%"SEL4_PRIx_word"..%"SEL4_PRIx_word") failed\n",
+                    (unsigned int)i, reg.start, reg.end);
+--- src/kernel/sel4/src/object/untyped.c
++++ src/kernel/sel4/src/object/untyped.c
+@@ -183,6 +183,33 @@
+     if (status != EXCEPTION_NONE) {
+         freeIndex = cap_untyped_cap_get_capFreeIndex(cap);
+         reset = false;
++    } else if (cap_untyped_cap_get_capIsDevice(cap) &&
++               cap_untyped_cap_get_capFreeIndex(cap) !=
++               MAX_FREE_INDEX(cap_untyped_cap_get_capBlockSize(cap))) {
++        /*
++         * Sponge OS (ledger row 28): a DEVICE untyped keeps its free
++         * index when its last child is deleted.
++         *
++         * seL4 allocates the objects retyped from an untyped at the
++         * untyped's free index, which advances with every retype. When
++         * the last child of an untyped is deleted, upstream resets that
++         * index to the untyped's base - correct for RAM (the memory is
++         * handed back), but fatal for device memory: userland (Genode
++         * core, row 14) advances a device untyped's index to reach a
++         * device BAR that sits in the middle of the untyped, and the
++         * reset silently moved every later object back to the base.
++         * The mapping then covered the wrong physical address and the
++         * driver read zeroes (the LG gram's xHCI BAR: "Host halt
++         * failed, -110"). Keeping the index for device untypeds makes
++         * the watermark model work; device memory is not reclaimable
++         * anyway, so nothing is lost.
++         *
++         * A fresh untyped carries the MAX_FREE_INDEX marker (its whole
++         * size as free space) and must still take the reset path, which
++         * is what moves it to the untyped's base.
++         */
++        freeIndex = cap_untyped_cap_get_capFreeIndex(cap);
++        reset = false;
+     } else {
+         freeIndex = 0;
+         reset = true;
