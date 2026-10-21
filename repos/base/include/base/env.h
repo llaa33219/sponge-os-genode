@@ -122,6 +122,33 @@ struct Genode::Env : Interface
 	                     Parent::Upgrade_args const &args) = 0;
 
 	/**
+	 * Upgrade session quota without waiting for the parent's answer
+	 *
+	 * \param id    ID of recipient session
+	 * \param args  description of the amount of quota to transfer
+	 *
+	 * In contrast to 'upgrade', this function never blocks. It returns
+	 * the parent's answer as-is, including 'PENDING' - the answer that
+	 * means "the request has been taken, but the session's provider has
+	 * not acted on it yet".
+	 *
+	 * The distinction matters for a component that acts as a CONTAINER
+	 * (an init): the thread that forwards an upgrade to its own parent
+	 * is the container's single entrypoint, which serves every child's
+	 * session plumbing and the containment alarm. Blocking there on a
+	 * provider that may never answer takes the whole container down -
+	 * permanently and silently, because the alarm that would have
+	 * noticed is parked on the same thread. A container must therefore
+	 * forward the request and report the answer truthfully, leaving the
+	 * retry to the requesting client.
+	 *
+	 * A leaf component keeps using 'upgrade', which waits for the
+	 * provider's answer.
+	 */
+	virtual Parent::Upgrade_result try_upgrade(Parent::Client::Id id,
+	                                           Parent::Upgrade_args const &args) = 0;
+
+	/**
 	 * Close session and block until the session is gone
 	 */
 	virtual void close(Parent::Client::Id) = 0;

@@ -257,6 +257,21 @@ struct Genode::Component_env : Env
 			_block_for_session();
 	}
 
+	Parent::Upgrade_result try_upgrade(Parent::Client::Id id,
+	                                   Parent::Upgrade_args const &args) override
+	{
+		/*
+		 * The parent's answer is passed through as-is: 'PENDING' is NOT
+		 * turned into a wait here, because the caller of this function is
+		 * a container forwarding an upgrade to its own parent, and the
+		 * thread it runs on is the container's single entrypoint (see
+		 * 'Env::try_upgrade').
+		 */
+		Mutex::Guard guard(_mutex);
+
+		return _parent.upgrade(id, args);
+	}
+
 	void close(Parent::Client::Id id) override
 	{
 		Mutex::Guard guard(_mutex);

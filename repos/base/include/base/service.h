@@ -368,7 +368,23 @@ class Genode::Try_parent_service : public Service
 					if (!session.id_at_parent.constructed())
 						error("invalid parent-session state: ", session);
 
-					_env.upgrade(session.id_at_parent->id(), args.string());
+					/*
+					 * The upgrade is forwarded WITHOUT waiting for the
+					 * parent's answer: this function runs on the
+					 * container's single entrypoint, and the parent's
+					 * 'PENDING' answer is not a promise - the session's
+					 * provider may never answer it. A container that
+					 * parks here takes its whole subtree down, silently
+					 * and forever.
+					 *
+					 * A quota that was not granted is reported as not
+					 * granted: the requesting client retries, and the
+					 * container stays responsive.
+					 */
+					if (_env.try_upgrade(session.id_at_parent->id(), args.string())
+					    != Parent::Upgrade_result::OK) {
+						return Initiate_error::OUT_OF_RAM;
+					}
 
 					session.confirm_ram_upgrade();
 					session.phase = Session_state::CAP_HANDED_OUT;
