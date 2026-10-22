@@ -122,6 +122,63 @@ struct Genode::Env : Interface
 	                     Parent::Upgrade_args const &args) = 0;
 
 	/**
+	 * Close session and block until the session is gone
+	 */
+	virtual void close(Parent::Client::Id) = 0;
+
+	/**
+	 * Excecute pending static constructors
+	 *
+	 * On component startup, the dynamic linker does not call possible static
+	 * constructors in the binary and shared libraries the binary depends on. If
+	 * the component requires static construction it needs to call this function
+	 * at construction time explicitly. For example, the libc implementation
+	 * executes this function before constructing libc components.
+	 */
+	virtual void exec_static_constructors() = 0;
+
+	using Session_result = Attempt<Session_capability, Session_error>;
+
+	/**
+	 * Attempt the creation of a session
+	 */
+	virtual Session_result try_session(Parent::Service_name const &,
+	                                   Parent::Client::Id,
+	                                   Parent::Session_args const &,
+	                                   Affinity             const &) = 0;
+
+	/**
+	 * Result of a session request that does not wait for the parent's answer
+	 */
+	enum class Session_request_result {
+		GRANTED, /* the session is available */
+		PENDING, /* the parent took the request, the session is not available yet */
+		DENIED   /* the parent denied the request */
+	};
+
+	/**
+	 * Token for issuing operations with componenent-global side effects
+	 *
+	 * The type of the returned reference is private to the underlying
+	 * platform. The reference is a mere token for orderly passing the
+	 * ability for invoking global size effects to low-level API functions
+	 * like the 'Rpc_entrypoint' constructor..
+	 *
+	 * \noapi
+	 */
+	virtual Runtime &runtime() = 0;
+
+	/*
+	 * The virtuals below were added after the initial definition of this
+	 * interface. They are appended at the END of the interface on purpose: a
+	 * component that was built against an earlier version of this header (e.g.
+	 * a prebuilt Qt-based component, which is not rebuilt when a base header
+	 * changes) dispatches the virtuals of this interface by their slot index.
+	 * Inserting a virtual in the middle would shift the slots of all later
+	 * virtuals and make such a component call a function with a mismatched
+	 * signature.
+	 */
+	/**
 	 * Upgrade session quota without waiting for the parent's answer
 	 *
 	 * \param id    ID of recipient session
@@ -156,11 +213,6 @@ struct Genode::Env : Interface
 	}
 
 	/**
-	 * Close session and block until the session is gone
-	 */
-	virtual void close(Parent::Client::Id) = 0;
-
-	/**
 	 * Close session without waiting for the parent's answer
 	 *
 	 * \param id  ID of the session to close
@@ -181,36 +233,6 @@ struct Genode::Env : Interface
 		close(id);
 		return Parent::Close_result::DONE;
 	}
-
-	/**
-	 * Excecute pending static constructors
-	 *
-	 * On component startup, the dynamic linker does not call possible static
-	 * constructors in the binary and shared libraries the binary depends on. If
-	 * the component requires static construction it needs to call this function
-	 * at construction time explicitly. For example, the libc implementation
-	 * executes this function before constructing libc components.
-	 */
-	virtual void exec_static_constructors() = 0;
-
-	using Session_result = Attempt<Session_capability, Session_error>;
-
-	/**
-	 * Attempt the creation of a session
-	 */
-	virtual Session_result try_session(Parent::Service_name const &,
-	                                   Parent::Client::Id,
-	                                   Parent::Session_args const &,
-	                                   Affinity             const &) = 0;
-
-	/**
-	 * Result of a session request that does not wait for the parent's answer
-	 */
-	enum class Session_request_result {
-		GRANTED, /* the session is available */
-		PENDING, /* the parent took the request, the session is not available yet */
-		DENIED   /* the parent denied the request */
-	};
 
 	/**
 	 * Attempt the creation of a session without waiting for the parent's answer
@@ -244,17 +266,6 @@ struct Genode::Env : Interface
 		                    : Session_request_result::DENIED;
 	}
 
-	/**
-	 * Token for issuing operations with componenent-global side effects
-	 *
-	 * The type of the returned reference is private to the underlying
-	 * platform. The reference is a mere token for orderly passing the
-	 * ability for invoking global size effects to low-level API functions
-	 * like the 'Rpc_entrypoint' constructor..
-	 *
-	 * \noapi
-	 */
-	virtual Runtime &runtime() = 0;
 
 };
 

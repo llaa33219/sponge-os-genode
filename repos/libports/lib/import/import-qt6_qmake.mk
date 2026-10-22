@@ -145,9 +145,24 @@ qmake_prepared.tag: env.sh \
                     build_dependencies/mkspecs
 	$(VERBOSE)touch $@
 
+#
+# The qmake build has no header dependencies: qmake does not know about the
+# Genode base headers, so a change of a base header (e.g. the layout of the
+# 'Genode::Env' interface, which is dispatched by vtable slot) would NOT
+# invalidate the objects built by qmake. The component would then be linked
+# against an interface with a different vtable layout and dispatch a virtual
+# function with a mismatched signature. The stamp below forces a rebuild of
+# the qmake build when a public base header changes.
+#
+QMAKE_BASE_HEADERS := $(wildcard $(BASE_DIR)/include/base/*.h) $(wildcard $(BASE_DIR)/include/parent/*.h)
+
+base_headers.stamp: $(QMAKE_BASE_HEADERS)
+	$(VERBOSE)rm -f *.o moc_*.cpp Makefile
+	$(VERBOSE)touch $@
+
 .PHONY: build_with_qmake
 
-build_with_qmake: qmake_prepared.tag qt6_so_files
+build_with_qmake: base_headers.stamp qmake_prepared.tag qt6_so_files
 
 	$(VERBOSE)source env.sh && $(QMAKE) \
 		-spec build_dependencies/mkspecs/$(QT_PLATFORM) \

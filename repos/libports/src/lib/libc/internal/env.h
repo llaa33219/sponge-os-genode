@@ -98,8 +98,22 @@ class Libc::Env_implementation : public Libc::Env
 		             Parent::Upgrade_args const &args) override {
 			return _env.upgrade(id, args); }
 
+		Parent::Upgrade_result try_upgrade(Parent::Client::Id id,
+		                                   Parent::Upgrade_args const &args) override {
+			return _env.try_upgrade(id, args); }
+
 		void close(Parent::Client::Id id) override {
 			return _env.close(id); }
+
+		Parent::Close_result try_close(Parent::Client::Id id) override {
+			return _env.try_close(id); }
+
+		Session_request_result try_session(Parent::Service_name const &name,
+		                                   Parent::Client::Id id,
+		                                   Parent::Session_args const &args,
+		                                   Affinity             const &aff,
+		                                   Session_capability  &cap) override {
+			return _env.try_session(name, id, args, aff, cap); }
 
 		/* already done by the libc */
 		void exec_static_constructors() override { }
