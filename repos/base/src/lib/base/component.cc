@@ -278,8 +278,32 @@ struct Genode::Component_env : Env
 	{
 		Mutex::Guard guard(_mutex);
 
-		if (_parent.upgrade(id, args) == Parent::Upgrade_result::PENDING)
+		if (_parent.upgrade(id, args) != Parent::Upgrade_result::PENDING)
+			return;
+
+		_block_for_session();
+
+		/*
+		 * The parent's answer to an upgrade does not re-submit the
+		 * session signal: 'Child::session_sigh' only latches the phases
+		 * in which a session BECOMES available. A wake-up that arrives
+		 * before the upgrade is answered is therefore lost, and the client
+		 * would wait forever. The capability is polled instead, the same
+		 * way the create path does it.
+		 */
+		for (unsigned attempt = 0; attempt < 10; attempt++) {
+
+			Session_capability cap { };
+
+			_parent.session_cap(id).with_result(
+				[&] (Capability<Session> c) { cap = c; },
+				[&] (Parent::Session_cap_error) { });
+
+			if (cap.valid())
+				return;
+
 			_block_for_session();
+		}
 	}
 
 	Parent::Upgrade_result try_upgrade(Parent::Client::Id id,

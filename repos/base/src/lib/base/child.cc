@@ -702,6 +702,14 @@ void Child::_resolve_pending_op(Pending_op &entry)
 	Service::Parent_state const state =
 		session.service().probe_at_parent(session);
 
+	/*
+	 * An operation that is still in flight at the parent must not be
+	 * completed here: the parent still owns the session, and releasing it
+	 * would corrupt the parent's ID space.
+	 */
+	if (state == Service::Parent_state::Pending)
+		return;
+
 	switch (op) {
 
 	case Op::Upgrade:

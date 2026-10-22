@@ -97,6 +97,7 @@ class Genode::Service : public Ram_transfer::Account,
 		enum class Parent_state {
 			Unknown, /* the service does not forward operations to a parent */
 			Alive,   /* the session still exists at the parent */
+			Pending, /* the operation is still in flight at the parent */
 			Gone,    /* the session no longer exists at the parent */
 			Failed   /* the parent refused the operation */
 		};
@@ -355,6 +356,7 @@ class Genode::Try_parent_service : public Service
 		Initiate_result initiate_request(Session_state &session) override
 		{
 			Initiate_result result = Ok();
+			Session_capability cap { };
 
 			switch (session.phase) {
 
@@ -365,13 +367,24 @@ class Genode::Try_parent_service : public Service
 				session.id_at_parent.construct(session.parent_client,
 				                               _env.id_space());
 
+				/*
+				 * The request is forwarded to the parent and waited for.
+				 *
+				 * The capability of a session that the parent creates
+				 * asynchronously is delivered through the parent's
+				 * 'session_cap' answer, which the client picks up. A
+				 * parent-provided session has no server-side ID, so the
+				 * capability cannot be delivered through
+				 * 'deliver_session_cap' - the wait below is the only
+				 * completion channel for it.
+				 */
 				_env.try_session(name().string(),
 				                 session.id_at_parent->id(),
 				                 Session_state::Server_args(session).string(),
 				                 session.affinity()).with_result(
 
-					[&] (Session_capability cap) {
-						session.cap = cap;
+					[&] (Session_capability c) {
+						session.cap = c;
 						session.phase = Session_state::AVAILABLE;
 					},
 					[&] (Session_error e) {
@@ -468,6 +481,33 @@ class Genode::Try_parent_service : public Service
 		{
 			if (!session.id_at_parent.constructed())
 				return Parent_state::Unknown;
+
+			/*
+			 * A session that is still being created, upgraded or closed
+			 * at the parent is IN FLIGHT. The parent answers such a
+			 * session's capability request with an invalid capability
+			 * (without an error), which must not be mistaken for "the
+			 * session is gone": the session's state is still owned by the
+			 * parent, and destroying it here would release the parent's
+			 * side of a session that is still running.
+			 */
+			switch (session.phase) {
+
+			case Session_state::CREATE_REQUESTED:
+			case Session_state::UPGRADE_REQUESTED:
+			case Session_state::CLOSE_REQUESTED:
+				return Parent_state::Pending;
+
+			case Session_state::AVAILABLE:
+			case Session_state::CAP_HANDED_OUT:
+				break;
+
+			case Session_state::SERVICE_DENIED:
+			case Session_state::INSUFFICIENT_RAM_QUOTA:
+			case Session_state::INSUFFICIENT_CAP_QUOTA:
+			case Session_state::CLOSED:
+				return Parent_state::Gone;
+			}
 
 			Parent_state state = Parent_state::Unknown;
 
