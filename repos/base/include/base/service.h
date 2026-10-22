@@ -483,20 +483,30 @@ class Genode::Try_parent_service : public Service
 				return Parent_state::Unknown;
 
 			/*
-			 * A session that is still being created, upgraded or closed
-			 * at the parent is IN FLIGHT. The parent answers such a
-			 * session's capability request with an invalid capability
-			 * (without an error), which must not be mistaken for "the
-			 * session is gone": the session's state is still owned by the
-			 * parent, and destroying it here would release the parent's
-			 * side of a session that is still running.
+			 * A session that is still being CREATED at the parent is IN
+			 * FLIGHT: the parent has neither created the session nor
+			 * rejected it, and it answers a capability request with an
+			 * invalid capability (without an error). That must not be
+			 * mistaken for "the session is gone": the session's state is
+			 * still owned by the parent, and destroying it here would
+			 * release the parent's side of a session that is still
+			 * running.
 			 */
 			switch (session.phase) {
 
 			case Session_state::CREATE_REQUESTED:
+				return Parent_state::Pending;
+
 			case Session_state::UPGRADE_REQUESTED:
 			case Session_state::CLOSE_REQUESTED:
-				return Parent_state::Pending;
+				/*
+				 * The LOCAL phase says nothing about the state of the
+				 * session at the parent: the request may still be in
+				 * flight there, or the parent may have acted on it
+				 * already (the session is gone). The parent is the only
+				 * authority on that - ask it below.
+				 */
+				break;
 
 			case Session_state::AVAILABLE:
 			case Session_state::CAP_HANDED_OUT:
@@ -509,15 +519,26 @@ class Genode::Try_parent_service : public Service
 				return Parent_state::Gone;
 			}
 
-			Parent_state state = Parent_state::Unknown;
+			Parent_state state = Parent_state::Pending;
 
+			/*
+			 * The parent's answer is unambiguous:
+			 *
+			 * - a valid capability: the session is fully available at the
+			 *   parent, i.e. the operation the container asked for has
+			 *   been carried out,
+			 * - an invalid capability without an error: the parent is
+			 *   still busy with the operation (the session is not ready),
+			 * - an error: the parent does not know the session anymore,
+			 *   i.e. it closed it.
+			 */
 			_env.parent().session_cap(session.id_at_parent->id()).with_result(
-				[&] (Capability<Genode::Session> cap) {
+				[&] (Capability<Session> cap) {
 					state = cap.valid() ? Parent_state::Alive
-					                    : Parent_state::Gone;
+					                    : Parent_state::Pending;
 				},
 				[&] (Parent::Session_cap_error) {
-					state = Parent_state::Failed;
+					state = Parent_state::Gone;
 				}
 			);
 

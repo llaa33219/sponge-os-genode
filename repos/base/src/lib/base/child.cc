@@ -281,7 +281,8 @@ Parent::Session_result Child::session(Parent::Client::Id id,
 		[&] (Pd_session &pd) {
 			_policy.with_route(name.string(), label,
 				[&] (Child_policy::Route const &route) { result = create(pd, route); },
-				[&] { });
+				[&] { log("session request for service \"", name.string(),
+				          "\" (label=\"", label.string(), "\") denied"); });
 		},
 		[&] { error(_policy.name(), ": PD uninitialized at session-creation time"); });
 
@@ -328,6 +329,16 @@ Parent::Session_cap_result Child::session_cap(Client::Id id)
 			if (session.phase == Session_state::UPGRADE_REQUESTED)
 				return Session_capability();
 
+			/*
+			 * A session whose close is in flight is not ready either, and
+			 * its phase must not change: the phase is what makes the
+			 * parent publish the close request to the provider. Reporting
+			 * the capability as 'handed out' here would cancel the close
+			 * request before the provider ever sees it.
+			 */
+			if (session.phase == Session_state::CLOSE_REQUESTED)
+				return Session_capability();
+
 			if (session.cap.valid())
 				session.phase = Session_state::CAP_HANDED_OUT;
 
@@ -336,8 +347,15 @@ Parent::Session_cap_result Child::session_cap(Client::Id id)
 			return session.cap;
 		},
 		[&] /* missing */ {
-			warning(_policy.name(), " requested session cap for unknown ID");
-			return Session_capability();
+			/*
+			 * The parent does not know this session anymore. The base
+			 * protocol defines an error answer of 'session_cap' as "the
+			 * parent closed the session" - a container that polls for the
+			 * completion of a forwarded close relies on that answer. A
+			 * plain invalid capability would be indistinguishable from
+			 * "not ready yet", and the container would wait forever.
+			 */
+			return Session_cap_error::DENIED;
 		}
 	);
 }
@@ -833,17 +851,16 @@ void Child::expire_pending_ops(unsigned elapsed_ms)
 		if (entry.op == Op::Expired || entry.expired)
 			continue;
 
-		unsigned const elapsed_before = entry.elapsed_ms;
-
 		entry.elapsed_ms += elapsed_ms;
 
 		/*
 		 * The resolution asks the parent whether the session is still
-		 * there. Once per second is enough to notice a completed
-		 * operation; the deadline below is what bounds the wait.
+		 * there. The client waits for that answer, so the resolution
+		 * happens on every tick - the tick rate is the granularity of the
+		 * completion, not the deadline below, which is what bounds the
+		 * wait.
 		 */
-		if (entry.elapsed_ms / 1000 != elapsed_before / 1000)
-			_resolve_pending_op(entry);
+		_resolve_pending_op(entry);
 
 		if (entry.op == Op::None || entry.op == Op::Expired || entry.expired)
 			continue;
@@ -856,7 +873,7 @@ void Child::expire_pending_ops(unsigned elapsed_ms)
 
 void Child::session_ready(Session_state &session)
 {
-	_clear_pending_op(session.id_at_client_if_valid());
+	_clear_pending_op(&session);
 
 	if (_session_sigh.valid() && session.async_client_notify)
 		Signal_transmitter(_session_sigh).submit();
@@ -865,7 +882,7 @@ void Child::session_ready(Session_state &session)
 
 void Child::session_closed(Session_state &session)
 {
-	_clear_pending_op(session.id_at_client_if_valid());
+	_clear_pending_op(&session);
 
 	/*
 	 * If the session was provided by a child of us, 'service.ram()' returns

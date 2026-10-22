@@ -439,16 +439,20 @@ void Genode::Sandbox::Library::apply_config(Node const &config)
 	                               _heartbeat);
 
 	/*
-	 * The deadline of the pending session operations needs a clock. The
-	 * heartbeat period is the sandbox's clock if the sandbox has a
-	 * heartbeat; without one, the sandbox needs a timer of its own.
+	 * The deadline of the pending session operations needs a clock, and the
+	 * clock must be fine-grained: a forwarded session operation is
+	 * completed as soon as the parent answers, and the client waits for
+	 * that completion. The heartbeat period (2 s in the product topology)
+	 * is far too coarse for that - the client would wait for seconds.
+	 *
+	 * The sandbox therefore always uses its own timer, no matter whether it
+	 * has a heartbeat.
 	 *
 	 * The timer determines its own availability by requesting the session
 	 * the same way a 'Timer::Connection' would - a denial is reported, not
 	 * fatal.
 	 */
-	if (!_heartbeat.active())
-		_pending_op_timer.arm();
+	_pending_op_timer.arm();
 
 	/*
 	 * After importing the new configuration, servers may have disappeared

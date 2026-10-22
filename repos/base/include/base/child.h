@@ -421,6 +421,15 @@ class Genode::Child : protected Rpc_object<Parent>,
 
 		void _clear_pending_op(Client::Id id);
 
+		/**
+		 * Clear the pending operation that belongs to the given session
+		 *
+		 * A pending operation must never outlive its session state: the
+		 * registry refers to the session by pointer, and the session state
+		 * is released with the slab. The client-side ID is not a reliable
+		 * substitute - the teardown of a child discards the client-side ID
+		 * of a session whose close is still pending.
+		 */
 		void _clear_pending_op(Session_state const *session);
 
 		bool _pending_op_expired(Client::Id id) const;

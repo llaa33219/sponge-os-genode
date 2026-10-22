@@ -58,13 +58,6 @@ class Sandbox::Heartbeat : Noncopyable
 					any_skipped_heartbeats = true;
 
 				child.heartbeat((unsigned)_elapsed_ms, (unsigned)_rate_ms);
-
-				/*
-				 * The heartbeat period is the sandbox's clock. It bounds the
-				 * session operations that our parent took but never
-				 * answered.
-				 */
-				child.expire_pending_ops((unsigned)_rate_ms);
 			});
 
 			if (any_skipped_heartbeats)
@@ -90,9 +83,10 @@ class Sandbox::Heartbeat : Noncopyable
 		/**
 		 * Return true if the sandbox has a heartbeat
 		 *
-		 * The heartbeat period is the sandbox's clock. A sandbox without a
-		 * heartbeat needs a clock of its own to bound the session
-		 * operations that its parent took but never answered.
+		 * The heartbeat period is the sandbox's clock for the startup grace
+		 * of a child. The deadline of the session operations that the
+		 * parent took but never answered is driven by the sandbox's own
+		 * timer, which is far more fine-grained.
 		 */
 		bool active() const { return _rate_ms != 0; }
 
