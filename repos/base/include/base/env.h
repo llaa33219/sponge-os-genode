@@ -204,6 +204,47 @@ struct Genode::Env : Interface
 	                                   Affinity             const &) = 0;
 
 	/**
+	 * Result of a session request that does not wait for the parent's answer
+	 */
+	enum class Session_request_result {
+		GRANTED, /* the session is available */
+		PENDING, /* the parent took the request, the session is not available yet */
+		DENIED   /* the parent denied the request */
+	};
+
+	/**
+	 * Attempt the creation of a session without waiting for the parent's answer
+	 *
+	 * \param cap  the session capability, valid if the result is 'GRANTED'
+	 *
+	 * In contrast to 'try_session', this function never blocks: a parent
+	 * that has taken the request but has not answered it yet is reported
+	 * as 'PENDING'. The parent delivers the session capability once its
+	 * provider has created the session, and the capability can then be
+	 * picked up by asking the parent for it.
+	 *
+	 * The rationale is the same as for 'try_upgrade' and 'try_close': a
+	 * container must not park on a parent that may never answer, because
+	 * the container's entrypoint serves every child's session plumbing.
+	 *
+	 * The default implementation is the blocking one, so a component that
+	 * does not opt in behaves exactly as before.
+	 */
+	virtual Session_request_result try_session(Parent::Service_name const &name,
+	                                           Parent::Client::Id id,
+	                                           Parent::Session_args const &args,
+	                                           Affinity const &affinity,
+	                                           Session_capability &cap)
+	{
+		try_session(name, id, args, affinity).with_result(
+			[&] (Session_capability c) { cap = c; },
+			[&] (Session_error) { });
+
+		return cap.valid() ? Session_request_result::GRANTED
+		                    : Session_request_result::DENIED;
+	}
+
+	/**
 	 * Token for issuing operations with componenent-global side effects
 	 *
 	 * The type of the returned reference is private to the underlying

@@ -367,6 +367,7 @@ _ZNK6Genode4Node8has_typeEPKc T
 _ZNK6Genode4Node9num_bytesEv T
 _ZNK6Genode4Slab8consumedEv T
 _ZNK6Genode5Child15main_thread_capEv T
+_ZNK6Genode5Child18pending_parent_opsEv T
 _ZNK6Genode5Child18skipped_heartbeatsEv T
 _ZNK6Genode5Child21notify_resource_availEv T
 _ZNK6Genode6Thread10stack_baseEv T

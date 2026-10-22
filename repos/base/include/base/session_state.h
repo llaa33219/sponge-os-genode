@@ -169,6 +169,28 @@ class Genode::Session_state : public Parent::Client, public Parent::Server
 			return _id_at_client->id();
 		}
 
+		/**
+		 * Client-side session ID that marks the absence of a client-side ID
+		 *
+		 * Never a valid ID in a client ID space.
+		 */
+		static constexpr Parent::Client::Id invalid_client_id { ~0UL };
+
+		/**
+		 * Client-side session ID, if the session still has one
+		 *
+		 * In contrast to 'id_at_client()', this function never throws. It
+		 * returns 'invalid_client_id' if the client-side ID has been
+		 * discarded.
+		 */
+		Parent::Client::Id id_at_client_if_valid() const
+		{
+			if (!_id_at_client.constructed())
+				return invalid_client_id;
+
+			return _id_at_client->id();
+		}
+
 		void discard_id_at_client()
 		{
 			_id_at_client.destruct();

@@ -174,6 +174,31 @@ struct Genode::Component_env : Env
 			[&] (Session_error e) { return e; });
 	}
 
+	Session_request_result try_session(Parent::Service_name const &name,
+	                                   Parent::Client::Id          id,
+	                                   Parent::Session_args const &args,
+	                                   Affinity             const &affinity,
+	                                   Session_capability        &cap) override
+	{
+		if (!args.valid_string()) {
+			warning(name.string(), " session denied because of truncated arguments");
+			return Session_request_result::DENIED;
+		}
+
+		/*
+		 * The mutex is not taken: the request must not block the
+		 * container's entrypoint, and the mutex is held while the blocking
+		 * variant waits for the parent's answer.
+		 */
+		return _parent.session(id, name, args, affinity).convert<Session_request_result>(
+			[&] (Capability<Session> c) -> Session_request_result {
+				cap = c;
+				return c.valid() ? Session_request_result::GRANTED
+				                 : Session_request_result::PENDING;
+			},
+			[&] (Session_error) { return Session_request_result::DENIED; });
+	}
+
 	Session_capability session(Parent::Service_name const &name,
 	                           Parent::Client::Id          id,
 	                           Parent::Session_args const &args,

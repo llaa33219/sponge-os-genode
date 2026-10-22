@@ -320,7 +320,7 @@ void Genode::Sandbox::Library::_destroy_abandoned_children()
 		_state_report_outdated = true;
 
 		/* destroy child once all environment sessions are gone */
-		if (child.env_sessions_closed()) {
+		if (child.env_sessions_closed() && !child.pending_parent_ops()) {
 			_children.remove(&child);
 
 			destroy(_heap, &child);
@@ -446,10 +446,6 @@ void Genode::Sandbox::Library::apply_config(Node const &config)
 	 * The timer determines its own availability by requesting the session
 	 * the same way a 'Timer::Connection' would - a denial is reported, not
 	 * fatal.
-	 *
-	 * The request is issued after the children have been started: a Timer
-	 * service may well be provided by one of them, and only a started child
-	 * can serve the session.
 	 */
 	if (!_heartbeat.active())
 		_pending_op_timer.arm();
@@ -527,6 +523,7 @@ void Genode::Sandbox::Library::apply_config(Node const &config)
 
 	if (_state_report_outdated)
 		_state_reporter.trigger_immediate_report_update();
+
 }
 
 

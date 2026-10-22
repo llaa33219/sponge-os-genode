@@ -365,8 +365,14 @@ class Genode::Child : protected Rpc_object<Parent>,
 
 		/**
 		 * Maximum number of session operations that may be pending at once
+		 *
+		 * A busy sandbox closes many short-lived sessions (a package
+		 * manager requests a ROM per file), and the parent's answer for
+		 * one close arrives at the parent's own pace. The registry must
+		 * therefore hold the operations of a whole configuration
+		 * generation, not just a handful.
 		 */
-		static constexpr unsigned MAX_PENDING_OPS = 8;
+		static constexpr unsigned MAX_PENDING_OPS = 64;
 
 		/**
 		 * A session operation that the parent took but has not answered yet
@@ -376,6 +382,23 @@ class Genode::Child : protected Rpc_object<Parent>,
 			unsigned   deadline_ms;
 			unsigned   elapsed_ms;
 			Op         op;
+
+			/**
+			 * True once the deadline of the operation has passed
+			 *
+			 * A close that ran into its deadline keeps waiting for the
+			 * parent's answer - the deadline abandons the wait, not the
+			 * session. The operation therefore stays in the registry.
+			 */
+			bool       expired;
+
+			/**
+			 * The session this operation belongs to
+			 *
+			 * The session may outlive its client-side ID (the client
+			 * vanished), so the operation cannot be looked up by ID alone.
+			 */
+			Session_state *session;
 		};
 
 		/*
@@ -394,15 +417,17 @@ class Genode::Child : protected Rpc_object<Parent>,
 		 */
 		static constexpr unsigned TIMEOUT_MS = 5000;
 
-		bool _register_pending_op(Client::Id id, Op op);
+		bool _register_pending_op(Client::Id id, Op op, Session_state *session);
 
 		void _clear_pending_op(Client::Id id);
 
+		void _clear_pending_op(Session_state const *session);
+
 		bool _pending_op_expired(Client::Id id) const;
 
-		void _resolve_pending_op(Client::Id id, Op op);
+		void _resolve_pending_op(Pending_op &entry);
 
-		void _expire_pending_op(Client::Id id, Op op);
+		void _expire_pending_op(Pending_op &entry);
 
 		/* allocator used for dynamically created session state objects */
 		Sliced_heap _session_md_alloc { _policy.session_md_ram(), _local_rm };
@@ -826,6 +851,20 @@ class Genode::Child : protected Rpc_object<Parent>,
 		 * entrypoint.
 		 */
 		void expire_pending_ops(unsigned elapsed_ms);
+
+		/**
+		 * Return true if the parent still holds a session of ours
+		 *
+		 * A close that the parent has not answered yet keeps the session
+		 * alive at the parent. The session state must not be destroyed
+		 * before the parent's answer arrives: the parent's ID space would
+		 * keep a dangling entry, and a new session request could reuse
+		 * the ID that the parent still owns.
+		 *
+		 * A child in this state must not be destroyed, because its
+		 * session slab would be released with a live session state.
+		 */
+		bool pending_parent_ops() const;
 
 		void for_each_session(auto const &fn) const
 		{

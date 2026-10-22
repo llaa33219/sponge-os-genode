@@ -755,6 +755,16 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 			_child.expire_pending_ops(elapsed_ms);
 		}
 
+		/**
+		 * Return true if the parent still holds a session of the child
+		 *
+		 * A close that the parent has not answered yet keeps the session
+		 * alive at the parent. The child must not be destroyed before the
+		 * parent answered, because the destruction would release the
+		 * child's session slab with a live session state.
+		 */
+		bool pending_parent_ops() const { return _child.pending_parent_ops(); }
+
 		void heartbeat(unsigned now_ms, unsigned rate_ms)
 		{
 			if (_heartbeat_expected())

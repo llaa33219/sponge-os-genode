@@ -133,6 +133,15 @@ void Session_state::generate_server_side_info(Generator &g, Detail detail) const
 void Session_state::destroy()
 {
 	/*
+	 * A session may be destroyed only if the parent has released its
+	 * side of the session. A live parent-side ID would leave a dangling
+	 * entry in the parent's ID space, which is corrupted as soon as the
+	 * ID is used again.
+	 */
+	if (id_at_parent.constructed())
+		error("destroying session with a live parent-side id: ", *this);
+
+	/*
 	 * Manually release client-side ID so that static env sessions are
 	 * immediately removed from the client ID space when 'destroy' is
 	 * called. Otherwise, the iterative cleanup of the cliend ID space

@@ -442,7 +442,7 @@ Parent::Upgrade_result Child::upgrade(Client::Id id, Parent::Upgrade_args const 
 			 */
 			if (session.phase == Session_state::UPGRADE_REQUESTED &&
 			    dynamic_cast<Try_parent_service *>(&session.service())) {
-				_register_pending_op(id, Op::Upgrade);
+				_register_pending_op(id, Op::Upgrade, &session);
 			}
 		},
 		[&] { warning(_policy.name(), ": PD unexpectedly not initialized"); });
@@ -523,6 +523,8 @@ void Child::_revert_quota_and_destroy(Pd_session &pd, Session_state &session)
 		}
 	}
 
+	_clear_pending_op(&session);
+
 	session.destroy();
 	_policy.session_state_changed();
 }
@@ -590,8 +592,8 @@ Child::Close_result Child::close(Client::Id id)
 			 * client waits for the completion, which is driven by the
 			 * parent's answer or by the deadline that this object owns.
 			 */
-			if (session.phase == Session_state::CLOSE_REQUESTED)
-				_register_pending_op(id, Op::Close);
+			if (result == Close_result::PENDING)
+				_register_pending_op(id, Op::Close, &session);
 
 			return result;
 		},
@@ -599,7 +601,7 @@ Child::Close_result Child::close(Client::Id id)
 }
 
 
-bool Child::_register_pending_op(Client::Id id, Op op)
+bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 {
 	/* an operation for this session replaces the previous one */
 	for (auto &entry : _pending_ops) {
@@ -608,7 +610,7 @@ bool Child::_register_pending_op(Client::Id id, Op op)
 			continue;
 
 		if (entry.id == id) {
-			entry = Pending_op { id, TIMEOUT_MS, 0, op };
+			entry = Pending_op { id, TIMEOUT_MS, 0, op, false, session };
 			return true;
 		}
 	}
@@ -618,7 +620,7 @@ bool Child::_register_pending_op(Client::Id id, Op op)
 		if (entry.op != Op::None)
 			continue;
 
-		entry = Pending_op { id, TIMEOUT_MS, 0, op };
+		entry = Pending_op { id, TIMEOUT_MS, 0, op, false, session };
 		return true;
 	}
 
@@ -632,19 +634,37 @@ bool Child::_register_pending_op(Client::Id id, Op op)
 	                                          : "close",
 	        " of session ", id);
 
-	_expire_pending_op(id, op);
+	Pending_op expired { id, TIMEOUT_MS, TIMEOUT_MS, op, false, session };
+	_expire_pending_op(expired);
 	return false;
 }
 
 
 void Child::_clear_pending_op(Client::Id id)
 {
+	/* a session without a client-side ID has no operation to clear */
+	if (id.value == Session_state::invalid_client_id.value)
+		return;
+
 	for (auto &entry : _pending_ops) {
 
 		if (entry.op == Op::None)
 			continue;
 
 		if (entry.id == id)
+			entry.op = Op::None;
+	}
+}
+
+
+void Child::_clear_pending_op(Session_state const *session)
+{
+	for (auto &entry : _pending_ops) {
+
+		if (entry.op == Op::None)
+			continue;
+
+		if (entry.session == session)
 			entry.op = Op::None;
 	}
 }
@@ -661,117 +681,134 @@ bool Child::_pending_op_expired(Client::Id id) const
 }
 
 
-void Child::_resolve_pending_op(Client::Id id, Op op)
+bool Child::pending_parent_ops() const
 {
-	_id_space.apply<Session_state>(id, [&] (Session_state &session) {
+	for (auto const &entry : _pending_ops) {
 
-		Service::Parent_state const state =
-			session.service().probe_at_parent(session);
-
-		switch (op) {
-
-		case Op::Upgrade:
-
-			/*
-			 * The parent answers a quota upgrade with the session's
-			 * capability as soon as the provider has acted on the
-			 * request. A session that the parent still reports as
-			 * 'upgrading' has not been answered yet.
-			 */
-			if (state == Service::Parent_state::Alive) {
-
-				session.phase = Session_state::CAP_HANDED_OUT;
-				session.confirm_ram_upgrade();
-
-				_clear_pending_op(id);
-
-				if (_session_sigh.valid())
-					Signal_transmitter(_session_sigh).submit();
-			}
-			break;
-
-		case Op::Close:
-
-			/*
-			 * A session that the parent does not know anymore is gone.
-			 */
-			if (state == Service::Parent_state::Gone) {
-
-				_clear_pending_op(id);
-
-				/*
-				 * The parent does not know the session anymore, so the
-				 * parent's ID space must not keep an entry for it. The ID
-				 * is released together with the session - releasing it
-				 * earlier would let the container reuse an ID that the
-				 * parent still holds.
-				 */
-				if (session.id_at_parent.constructed())
-					session.id_at_parent.destruct();
-
-				_revert_quota_and_destroy(session);
-
-				if (_session_sigh.valid())
-					Signal_transmitter(_session_sigh).submit();
-			}
-			break;
-
-		case Op::None:
-		case Op::Expired:
-			break;
-		}
-	},
-	[&] /* the session is gone */ { _clear_pending_op(id); });
+		if (entry.op == Op::Close)
+			return true;
+	}
+	return false;
 }
 
 
-void Child::_expire_pending_op(Client::Id id, Op op)
+void Child::_resolve_pending_op(Pending_op &entry)
 {
-	_id_space.apply<Session_state>(id, [&] (Session_state &session) {
+	Client::Id const id = entry.id;
+	Op const op = entry.op;
 
-		switch (op) {
+	Session_state &session = *entry.session;
 
-		case Op::Upgrade:
+	Service::Parent_state const state =
+		session.service().probe_at_parent(session);
 
-			warning(_policy.name(), ": RAM upgrade of ", session.service().name(),
-			        " (session ", id, ") failed - the provider did not answer "
-			        "within ", TIMEOUT_MS, " ms");
+	switch (op) {
 
-			session.confirm_ram_upgrade();
+	case Op::Upgrade:
+
+		/*
+		 * The parent answers a quota upgrade with the session's
+		 * capability as soon as the provider has acted on the request. A
+		 * session that the parent still reports as 'upgrading' has not
+		 * been answered yet.
+		 */
+		if (state == Service::Parent_state::Alive) {
+
 			session.phase = Session_state::CAP_HANDED_OUT;
-			break;
+			session.confirm_ram_upgrade();
 
-		case Op::Close:
+			_clear_pending_op(id);
 
-			warning(_policy.name(), ": close of ", session.service().name(),
-			        " (session ", id, ") failed - the provider did not answer "
-			        "within ", TIMEOUT_MS, " ms");
+			if (_session_sigh.valid())
+				Signal_transmitter(_session_sigh).submit();
+		}
+		break;
 
-			session.phase = Session_state::CLOSED;
+	case Op::Close:
+
+		/*
+		 * A session that the parent does not know anymore is gone. The
+		 * parent's ID is released only now: the parent has confirmed that
+		 * the session is gone, so the ID may be reused.
+		 */
+		if (state == Service::Parent_state::Gone) {
+
+			_clear_pending_op(id);
 
 			if (session.id_at_parent.constructed())
 				session.id_at_parent.destruct();
-			break;
 
-		case Op::None:
-		case Op::Expired:
-			return;
+			_revert_quota_and_destroy(session);
+
+			if (_session_sigh.valid())
+				Signal_transmitter(_session_sigh).submit();
 		}
+		break;
+
+	case Op::None:
+	case Op::Expired:
+		break;
+	}
+}
+
+
+void Child::_expire_pending_op(Pending_op &entry)
+{
+	Client::Id const id = entry.id;
+	Op const op = entry.op;
+
+	Session_state &session = *entry.session;
+
+	switch (op) {
+
+	case Op::Upgrade:
+
+		warning(_policy.name(), ": RAM upgrade of ", session.service().name(),
+		        " (session ", id, ") failed - the provider did not answer "
+		        "within ", TIMEOUT_MS, " ms");
+
+		session.confirm_ram_upgrade();
+		session.phase = Session_state::CAP_HANDED_OUT;
+		break;
+
+	case Op::Close:
+
+		warning(_policy.name(), ": close of ", session.service().name(),
+		        " (session ", id, ") failed - the provider did not answer "
+		        "within ", TIMEOUT_MS, " ms");
 
 		/*
-		 * The operation stays in the registry, marked as expired: a client
-		 * that retries the request must not transfer the quota a second
-		 * time.
+		 * The deadline abandons the wait, not the session. The session
+		 * stays alive at the parent, so the parent's ID must not be
+		 * released here: a new session request could otherwise reuse an ID
+		 * that the parent still owns. The parent's late answer destroys
+		 * the session state.
 		 */
-		for (auto &entry : _pending_ops) {
-			if (entry.id == id)
-				entry.op = Op::Expired;
-		}
+		break;
 
-		if (_session_sigh.valid())
-			Signal_transmitter(_session_sigh).submit();
-	},
-	[&] /* the session is gone */ { _clear_pending_op(id); });
+	case Op::None:
+	case Op::Expired:
+		return;
+	}
+
+	/*
+	 * The operation stays in the registry, marked as expired: a client
+	 * that retries the request must not transfer the quota a second time.
+	 * A close is not marked as expired: the session is still owned by the
+	 * parent, and the child must not be destroyed before the parent
+	 * answered.
+	 */
+	if (op != Op::Close) {
+		for (auto &e : _pending_ops) {
+			if (e.id == id)
+				e.op = Op::Expired;
+		}
+	}
+
+	entry.expired = true;
+
+	if (_session_sigh.valid())
+		Signal_transmitter(_session_sigh).submit();
 }
 
 
@@ -784,45 +821,34 @@ void Child::expire_pending_ops(unsigned elapsed_ms)
 		if (entry.op == Op::None)
 			continue;
 
+		/* an expired operation is not resolved again */
+		if (entry.op == Op::Expired || entry.expired)
+			continue;
+
 		unsigned const elapsed_before = entry.elapsed_ms;
 
 		entry.elapsed_ms += elapsed_ms;
 
-		/* an expired operation is not resolved again */
-		if (entry.op == Op::Expired)
-			continue;
-
-		Client::Id const id = entry.id;
-		Op const op = entry.op;
-
 		/*
 		 * The resolution asks the parent whether the session is still
-		 * there - a blocking RPC into the parent, and therefore a call the
-		 * container's entrypoint must not make often. Once per second is
-		 * enough to notice a completed operation; the deadline below is
-		 * what bounds the wait.
+		 * there. Once per second is enough to notice a completed
+		 * operation; the deadline below is what bounds the wait.
 		 */
 		if (entry.elapsed_ms / 1000 != elapsed_before / 1000)
-			_resolve_pending_op(id, op);
+			_resolve_pending_op(entry);
 
-		Pending_op *current = nullptr;
-		for (auto &e : _pending_ops) {
-			if (e.op == op && e.id == id)
-				current = &e;
-		}
-
-		if (!current)
+		if (entry.op == Op::None || entry.op == Op::Expired || entry.expired)
 			continue;
 
-		if (current->elapsed_ms >= TIMEOUT_MS)
-			_expire_pending_op(id, op);
+		if (entry.elapsed_ms >= TIMEOUT_MS)
+			_expire_pending_op(entry);
 	}
 }
 
 
 void Child::session_ready(Session_state &session)
 {
-	_clear_pending_op(session.id_at_client());
+	_clear_pending_op(session.id_at_client_if_valid());
 
 	if (_session_sigh.valid() && session.async_client_notify)
 		Signal_transmitter(_session_sigh).submit();
@@ -831,7 +857,7 @@ void Child::session_ready(Session_state &session)
 
 void Child::session_closed(Session_state &session)
 {
-	_clear_pending_op(session.id_at_client());
+	_clear_pending_op(session.id_at_client_if_valid());
 
 	/*
 	 * If the session was provided by a child of us, 'service.ram()' returns
@@ -928,6 +954,8 @@ void Child::session_response(Server::Id id, Session_response response)
 				 */
 				if (session.id_at_parent.constructed())
 					session.id_at_parent.destruct();
+
+				_clear_pending_op(&session);
 
 				session.destroy();
 				_policy.session_state_changed();
@@ -1279,8 +1307,26 @@ void Child::close_all_sessions()
 
 		Close_result const close_result = _close(session);
 
-		if (close_result == Close_result::PENDING)
-			session.discard_id_at_client();
+		if (close_result != Close_result::PENDING)
+			return;
+
+		/*
+		 * The close is still pending at the parent. The session state must
+		 * stay alive: the parent's ID space still holds the session, and
+		 * the parent's late answer ('session_response(CLOSED)') is what
+		 * destroys the state. Releasing the parent's ID here would let a
+		 * new session request reuse an ID that the parent still owns.
+		 *
+		 * The pending operation keeps the child alive: as long as the
+		 * parent may still answer, the child must not be destroyed,
+		 * because the destruction would release the session slab with a
+		 * live session state.
+		 */
+		Client::Id const id = session.id_at_client();
+
+		_register_pending_op(id, Op::Close, &session);
+
+		session.discard_id_at_client();
 	};
 
 	while (_id_space.apply_any<Session_state>(close_fn));

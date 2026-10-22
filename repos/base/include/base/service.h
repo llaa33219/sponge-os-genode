@@ -461,8 +461,8 @@ class Genode::Try_parent_service : public Service
 			case Session_state::CLOSED:
 				break;
 			}
-			return result;
-		}
+		return result;
+	}
 
 		Parent_state probe_at_parent(Session_state &session) override
 		{
@@ -484,6 +484,7 @@ class Genode::Try_parent_service : public Service
 			return state;
 		}
 };
+
 
 
 /**
