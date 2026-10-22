@@ -745,6 +745,16 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 		void apply_upgrade();
 		void apply_downgrade();
 
+		/**
+		 * Advance the deadline of the child's pending session operations
+		 *
+		 * \param elapsed_ms  time that passed since the last call
+		 */
+		void expire_pending_ops(unsigned elapsed_ms)
+		{
+			_child.expire_pending_ops(elapsed_ms);
+		}
+
 		void heartbeat(unsigned now_ms, unsigned rate_ms)
 		{
 			if (_heartbeat_expected())

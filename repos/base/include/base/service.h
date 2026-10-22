@@ -92,6 +92,26 @@ class Genode::Service : public Ram_transfer::Account,
 		using Initiate_result = Attempt<Ok, Initiate_error>;
 
 		/**
+		 * State of a session operation at the parent
+		 */
+		enum class Parent_state {
+			Unknown, /* the service does not forward operations to a parent */
+			Alive,   /* the session still exists at the parent */
+			Gone,    /* the session no longer exists at the parent */
+			Failed   /* the parent refused the operation */
+		};
+
+		/**
+		 * Probe the state of a session at the parent
+		 *
+		 * The default implementation reports 'Unknown', i.e. the service
+		 * does not forward session operations to a parent. A service that
+		 * does forward them overrides this method and reports the state of
+		 * the session at the parent.
+		 */
+		virtual Parent_state probe_at_parent(Session_state &) { return Parent_state::Unknown; }
+
+		/**
 		 * Attempt the immediate (synchronous) creation of a session
 		 *
 		 * Sessions to local services and parent services are usually created
@@ -340,6 +360,8 @@ class Genode::Try_parent_service : public Service
 
 			case Session_state::CREATE_REQUESTED:
 
+				session.async_client_notify = true;
+
 				session.id_at_parent.construct(session.parent_client,
 				                               _env.id_space());
 
@@ -368,17 +390,64 @@ class Genode::Try_parent_service : public Service
 					if (!session.id_at_parent.constructed())
 						error("invalid parent-session state: ", session);
 
-					_env.upgrade(session.id_at_parent->id(), args.string());
+					session.async_client_notify = true;
 
-					session.confirm_ram_upgrade();
-					session.phase = Session_state::CAP_HANDED_OUT;
+					/*
+					 * The upgrade is forwarded WITHOUT waiting for the
+					 * parent's answer: this function runs on the
+					 * container's single entrypoint, and the parent's
+					 * 'PENDING' answer is not a promise - the session's
+					 * provider may never answer it. A container that
+					 * parks here takes its whole subtree down, silently
+					 * and forever.
+					 */
+					switch (_env.try_upgrade(session.id_at_parent->id(),
+					                        args.string())) {
+
+					case Parent::Upgrade_result::OK:
+						session.confirm_ram_upgrade();
+						session.phase = Session_state::CAP_HANDED_OUT;
+						break;
+
+					case Parent::Upgrade_result::PENDING:
+						/*
+						 * The parent has taken the request but the
+						 * session's provider has not acted on it yet. The
+						 * quota transfer stays in place - the provider
+						 * receives the quota - and the completion is
+						 * driven by the parent's answer or by the
+						 * deadline that the container owns.
+						 */
+						break;
+
+					case Parent::Upgrade_result::OUT_OF_RAM:
+						return Initiate_error::OUT_OF_RAM;
+
+					case Parent::Upgrade_result::OUT_OF_CAPS:
+						return Initiate_error::OUT_OF_CAPS;
+					}
 				}
 				break;
 
 			case Session_state::CLOSE_REQUESTED:
 
-				if (session.id_at_parent.constructed())
-					_env.close(session.id_at_parent->id());
+				if (session.id_at_parent.constructed()) {
+
+					/*
+					 * The close is forwarded WITHOUT waiting for the
+					 * parent's answer, for the same reason as the upgrade
+					 * above.
+					 */
+					if (_env.try_close(session.id_at_parent->id())
+					    == Parent::Close_result::PENDING) {
+						/*
+						 * The session is not gone yet. The completion is
+						 * driven by the parent's answer or by the
+						 * deadline that the container owns.
+						 */
+						break;
+					}
+				}
 
 				session.id_at_parent.destruct();
 				session.phase = Session_state::CLOSED;
@@ -393,6 +462,26 @@ class Genode::Try_parent_service : public Service
 				break;
 			}
 			return result;
+		}
+
+		Parent_state probe_at_parent(Session_state &session) override
+		{
+			if (!session.id_at_parent.constructed())
+				return Parent_state::Unknown;
+
+			Parent_state state = Parent_state::Unknown;
+
+			_env.parent().session_cap(session.id_at_parent->id()).with_result(
+				[&] (Capability<Genode::Session> cap) {
+					state = cap.valid() ? Parent_state::Alive
+					                    : Parent_state::Gone;
+				},
+				[&] (Parent::Session_cap_error) {
+					state = Parent_state::Failed;
+				}
+			);
+
+			return state;
 		}
 };
 

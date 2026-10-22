@@ -20,6 +20,7 @@
 #include <alias.h>
 #include <server.h>
 #include <heartbeat.h>
+#include <pending_session_op.h>
 #include <config_model.h>
 
 struct Genode::Sandbox::Library : ::Sandbox::State_reporter::Producer,
@@ -38,6 +39,7 @@ struct Genode::Sandbox::Library : ::Sandbox::State_reporter::Producer,
 	using Verbose        = ::Sandbox::Verbose;
 	using State_reporter = ::Sandbox::State_reporter;
 	using Heartbeat      = ::Sandbox::Heartbeat;
+	using Pending_op_timer = ::Sandbox::Pending_op_timer;
 	using Server         = ::Sandbox::Server;
 	using Alias          = ::Sandbox::Alias;
 	using Child          = ::Sandbox::Child;
@@ -80,6 +82,12 @@ struct Genode::Sandbox::Library : ::Sandbox::State_reporter::Producer,
 	State_reporter _state_reporter;
 
 	Heartbeat _heartbeat { _env, _children, _state_reporter };
+
+	/*
+	 * Timer that advances the deadline of the session operations that our
+	 * parent took but has not answered yet
+	 */
+	Pending_op_timer _pending_op_timer { _env, _children };
 
 	/*
 	 * Internal representation of the configuration
@@ -429,6 +437,22 @@ void Genode::Sandbox::Library::apply_config(Node const &config)
 	                               *this, *this, _server,
 	                               _state_reporter,
 	                               _heartbeat);
+
+	/*
+	 * The deadline of the pending session operations needs a clock. The
+	 * heartbeat period is the sandbox's clock if the sandbox has a
+	 * heartbeat; without one, the sandbox needs a timer of its own.
+	 *
+	 * The timer determines its own availability by requesting the session
+	 * the same way a 'Timer::Connection' would - a denial is reported, not
+	 * fatal.
+	 *
+	 * The request is issued after the children have been started: a Timer
+	 * service may well be provided by one of them, and only a started child
+	 * can serve the session.
+	 */
+	if (!_heartbeat.active())
+		_pending_op_timer.arm();
 
 	/*
 	 * After importing the new configuration, servers may have disappeared

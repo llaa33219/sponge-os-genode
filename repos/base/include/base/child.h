@@ -357,6 +357,53 @@ class Genode::Child : protected Rpc_object<Parent>,
 		/* sessions opened by the child */
 		Id_space<Client> _id_space { };
 
+		/**
+		 * Kind of session operation that the parent took but has not
+		 * answered yet
+		 */
+		enum class Op : unsigned char { None = 0, Upgrade, Close, Expired };
+
+		/**
+		 * Maximum number of session operations that may be pending at once
+		 */
+		static constexpr unsigned MAX_PENDING_OPS = 8;
+
+		/**
+		 * A session operation that the parent took but has not answered yet
+		 */
+		struct Pending_op {
+			Client::Id id;
+			unsigned   deadline_ms;
+			unsigned   elapsed_ms;
+			Op         op;
+		};
+
+		/*
+		 * Registry of the session operations that the parent took but has
+		 * not answered yet. The parent answers 'PENDING' for a session
+		 * operation whose provider has not acted on the request yet, and a
+		 * provider that is stuck never answers. The operation therefore
+		 * carries a deadline that this object owns - nobody else may
+		 * complete it.
+		 */
+		Pending_op _pending_ops[MAX_PENDING_OPS] { };
+
+		/**
+		 * Time after which a session operation that the parent never
+		 * answered is failed
+		 */
+		static constexpr unsigned TIMEOUT_MS = 5000;
+
+		bool _register_pending_op(Client::Id id, Op op);
+
+		void _clear_pending_op(Client::Id id);
+
+		bool _pending_op_expired(Client::Id id) const;
+
+		void _resolve_pending_op(Client::Id id, Op op);
+
+		void _expire_pending_op(Client::Id id, Op op);
+
 		/* allocator used for dynamically created session state objects */
 		Sliced_heap _session_md_alloc { _policy.session_md_ram(), _local_rm };
 
@@ -766,6 +813,19 @@ class Genode::Child : protected Rpc_object<Parent>,
 		}
 
 		void close_all_sessions();
+
+		/**
+		 * Advance the deadline of the pending session operations
+		 *
+		 * \param elapsed_ms  time that passed since the last call
+		 *
+		 * The parent may answer a session operation at any time, and it may
+		 * never answer it. This function resolves the operations the parent
+		 * has answered and fails the ones that ran into their deadline. It
+		 * is called by the container's timer, never from the container's
+		 * entrypoint.
+		 */
+		void expire_pending_ops(unsigned elapsed_ms);
 
 		void for_each_session(auto const &fn) const
 		{

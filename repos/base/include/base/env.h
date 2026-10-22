@@ -122,9 +122,65 @@ struct Genode::Env : Interface
 	                     Parent::Upgrade_args const &args) = 0;
 
 	/**
+	 * Upgrade session quota without waiting for the parent's answer
+	 *
+	 * \param id    ID of recipient session
+	 * \param args  description of the amount of quota to transfer
+	 *
+	 * In contrast to 'upgrade', this function never blocks. It returns the
+	 * parent's answer as-is, including 'PENDING' - the answer that means
+	 * "the request has been taken, but the session's provider has not acted
+	 * on it yet".
+	 *
+	 * The distinction matters for a component that acts as a CONTAINER (an
+	 * init): the thread that forwards an upgrade to its own parent is the
+	 * container's single entrypoint, which serves every child's session
+	 * plumbing and the containment alarm. Blocking there on a provider that
+	 * may never answer takes the whole container down - permanently and
+	 * silently, because the alarm that would have noticed is parked on the
+	 * same thread. A container must therefore forward the request without
+	 * waiting and complete it asynchronously.
+	 *
+	 * A leaf component keeps using 'upgrade', which waits for the provider's
+	 * answer.
+	 *
+	 * The default implementation falls back to the blocking 'upgrade', which
+	 * is the behaviour of a component that does not need the non-blocking
+	 * variant.
+	 */
+	virtual Parent::Upgrade_result try_upgrade(Parent::Client::Id id,
+	                                             Parent::Upgrade_args const &args)
+	{
+		upgrade(id, args);
+		return Parent::Upgrade_result::OK;
+	}
+
+	/**
 	 * Close session and block until the session is gone
 	 */
 	virtual void close(Parent::Client::Id) = 0;
+
+	/**
+	 * Close session without waiting for the parent's answer
+	 *
+	 * \param id  ID of the session to close
+	 *
+	 * In contrast to 'close', this function never blocks. It returns the
+	 * parent's answer as-is, including 'PENDING' - the answer that means
+	 * "the request has been taken, but the session is not gone yet".
+	 *
+	 * The rationale is the same as for 'try_upgrade': a container that
+	 * forwards a close request to its own parent must not park on that
+	 * answer, because the container's single entrypoint serves every child's
+	 * session plumbing and the containment alarm.
+	 *
+	 * The default implementation falls back to the blocking 'close'.
+	 */
+	virtual Parent::Close_result try_close(Parent::Client::Id id)
+	{
+		close(id);
+		return Parent::Close_result::DONE;
+	}
 
 	/**
 	 * Excecute pending static constructors

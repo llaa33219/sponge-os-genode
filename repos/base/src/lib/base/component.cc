@@ -130,7 +130,6 @@ struct Genode::Component_env : Env
 			[&] (Capability<Session> cap) -> Session_result {
 				if (cap.valid())
 					return cap;
-
 				/*
 				 * The parent answered the session request asynchronously.
 				 * Block until the session becomes available or fails.
@@ -162,6 +161,7 @@ struct Genode::Component_env : Env
 								}
 								return Session_error::DENIED; }
 						);
+
 
 					bool const still_pending = result.convert<bool>(
 						[&] (Capability<Session> cap) { return !cap.valid(); },
@@ -257,12 +257,38 @@ struct Genode::Component_env : Env
 			_block_for_session();
 	}
 
+	Parent::Upgrade_result try_upgrade(Parent::Client::Id id,
+	                                   Parent::Upgrade_args const &args) override
+	{
+		/*
+		 * The parent's answer is passed through as-is: 'PENDING' is NOT
+		 * turned into a wait here, because the caller of this function is a
+		 * container forwarding an upgrade to its own parent, and the thread
+		 * it runs on is the container's single entrypoint (see
+		 * 'Env::try_upgrade').
+		 */
+		Mutex::Guard guard(_mutex);
+
+		return _parent.upgrade(id, args);
+	}
+
 	void close(Parent::Client::Id id) override
 	{
 		Mutex::Guard guard(_mutex);
 
 		if (_parent.close(id) == Parent::Close_result::PENDING)
 			_block_for_session();
+	}
+
+	Parent::Close_result try_close(Parent::Client::Id id) override
+	{
+		/*
+		 * The parent's answer is passed through as-is, for the same reason
+		 * as in 'try_upgrade'.
+		 */
+		Mutex::Guard guard(_mutex);
+
+		return _parent.close(id);
 	}
 
 	void exec_static_constructors() override
