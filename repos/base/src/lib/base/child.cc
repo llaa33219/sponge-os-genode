@@ -241,6 +241,20 @@ Parent::Session_result Child::session(Parent::Client::Id id,
 							[&] (Error e)        { return session_error(e); });
 				}
 
+				/*
+				 * A session whose creation the parent took but has not
+				 * answered yet is completed by the container's own clock:
+				 * the parent answers a capability request with the session's
+				 * capability as soon as the provider has created the
+				 * session. Without the registration, nobody would ever
+				 * complete the operation.
+				 */
+				if (session.phase == Session_state::CREATE_REQUESTED
+				 && service.probe_at_parent(session)
+				      == Service::Parent_state::Pending) {
+					_register_pending_op(id, Op::Create, &session);
+				}
+
 				if (session.phase == Session_state::SERVICE_DENIED) {
 					_revert_quota_and_destroy(session);
 					return Session_error::DENIED;
@@ -317,7 +331,14 @@ Parent::Session_cap_result Child::session_cap(Client::Id id)
 				}
 			}
 
-			if (!session.alive())
+			/*
+			 * A session whose creation is still in flight at the parent is
+			 * polled by the container's clock. The poll is a normal
+			 * operation, not a mistake - warning about it would produce one
+			 * line per poll.
+			 */
+			if (!session.alive()
+			 && session.phase != Session_state::CREATE_REQUESTED)
 				warning(_policy.name(), ": attempt to request cap for unavailable session: ", session);
 
 			/*
@@ -569,7 +590,7 @@ Child::Close_result Child::_close(Session_state &session)
 	}
 
 	/* close session if alive */
-	if (session.alive()) {
+	if (session.alive() || session.phase == Session_state::CREATE_REQUESTED) {
 		session.phase = Session_state::CLOSE_REQUESTED;
 		if (session.service().initiate_request(session).failed())
 			warning("failed to initiate close request: ", session);
@@ -621,6 +642,9 @@ Child::Close_result Child::close(Client::Id id)
 
 bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 {
+	unsigned const deadline_ms = (op == Op::Create) ? CREATE_TIMEOUT_MS
+	                                                : TIMEOUT_MS;
+
 	/* an operation for this session replaces the previous one */
 	for (auto &entry : _pending_ops) {
 
@@ -628,7 +652,7 @@ bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 			continue;
 
 		if (entry.id == id) {
-			entry = Pending_op { id, TIMEOUT_MS, 0, op, false, session };
+			entry = Pending_op { id, deadline_ms, 0, op, false, session };
 			return true;
 		}
 	}
@@ -638,7 +662,7 @@ bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 		if (entry.op != Op::None)
 			continue;
 
-		entry = Pending_op { id, TIMEOUT_MS, 0, op, false, session };
+		entry = Pending_op { id, deadline_ms, 0, op, false, session };
 		return true;
 	}
 
@@ -649,10 +673,11 @@ bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 	 */
 	warning(_policy.name(), ": too many pending session operations - "
 	        "failing the ", (op == Op::Upgrade) ? "quota upgrade"
-	                                          : "close",
+	                                          : ((op == Op::Create) ? "creation"
+	                                                                : "close"),
 	        " of session ", id);
 
-	Pending_op expired { id, TIMEOUT_MS, TIMEOUT_MS, op, false, session };
+	Pending_op expired { id, deadline_ms, deadline_ms, op, false, session };
 	_expire_pending_op(expired);
 	return false;
 }
@@ -717,6 +742,21 @@ void Child::_resolve_pending_op(Pending_op &entry)
 
 	Session_state &session = *entry.session;
 
+	if (op == Op::Create) {
+
+		/*
+		 * The parent answers a capability request with the session's
+		 * capability as soon as the provider has created the session. The
+		 * generic probe below cannot answer this question: the session is
+		 * in flight at the parent as long as the provider has not acted on
+		 * the request.
+		 */
+		if (session.service().complete_create(session))
+			_clear_pending_op(&session);
+
+		return;
+	}
+
 	Service::Parent_state const state =
 		session.service().probe_at_parent(session);
 
@@ -771,6 +811,10 @@ void Child::_resolve_pending_op(Pending_op &entry)
 		}
 		break;
 
+	case Op::Create:
+		/* handled above, before the generic probe */
+		break;
+
 	case Op::None:
 	case Op::Expired:
 		break;
@@ -812,6 +856,26 @@ void Child::_expire_pending_op(Pending_op &entry)
 		 */
 		break;
 
+	case Op::Create:
+
+		warning(_policy.name(), ": create of ", session.service().name(),
+		        " (session ", id, ") failed - the provider did not answer "
+		        "within ", entry.deadline_ms, " ms");
+
+		/*
+		 * The client is released with a denial: it waits for the session's
+		 * capability and must not wait forever.
+		 *
+		 * The parent's ID must not be released here: the parent may still
+		 * create the session, and the ID must not be reused for another
+		 * session in the meantime.
+		 */
+		session.phase = Session_state::SERVICE_DENIED;
+
+		if (session.ready_callback)
+			session.ready_callback->session_ready(session);
+		break;
+
 	case Op::None:
 	case Op::Expired:
 		return;
@@ -822,9 +886,10 @@ void Child::_expire_pending_op(Pending_op &entry)
 	 * that retries the request must not transfer the quota a second time.
 	 * A close is not marked as expired: the session is still owned by the
 	 * parent, and the child must not be destroyed before the parent
-	 * answered.
+	 * answered. The same holds for a create: the parent may still create
+	 * the session.
 	 */
-	if (op != Op::Close) {
+	if (op != Op::Close && op != Op::Create) {
 		for (auto &e : _pending_ops) {
 			if (e.id == id)
 				e.op = Op::Expired;
@@ -865,7 +930,7 @@ void Child::expire_pending_ops(unsigned elapsed_ms)
 		if (entry.op == Op::None || entry.op == Op::Expired || entry.expired)
 			continue;
 
-		if (entry.elapsed_ms >= TIMEOUT_MS)
+		if (entry.elapsed_ms >= entry.deadline_ms)
 			_expire_pending_op(entry);
 	}
 }

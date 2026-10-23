@@ -46,13 +46,49 @@ class Sandbox::Parent_service : public Genode::Try_parent_service, public Abando
 
 		Registry<Parent_service>::Element _reg_elem;
 
+		/**
+		 * State of the clock that completes the session requests this
+		 * service forwards to the parent
+		 *
+		 * A forwarded request that the parent takes but does not answer is
+		 * completed by the container's own clock. Without the clock, nobody
+		 * would ever complete the request - the request must fail instead.
+		 */
+		bool const &_clock_armed;
+
 	public:
 
 		Parent_service(Registry<Parent_service> &registry, Env &env,
-		               Service::Name const &name)
+		               Service::Name const &name, bool const &clock_armed)
 		:
-			Genode::Try_parent_service(env, name), _reg_elem(registry, *this)
+			Genode::Try_parent_service(env, name), _reg_elem(registry, *this),
+			_clock_armed(clock_armed)
 		{ }
+
+		Initiate_result initiate_request(Session_state &session) override
+		{
+			Initiate_result const result =
+				Genode::Try_parent_service::initiate_request(session);
+
+			if (session.phase == Session_state::CREATE_REQUESTED
+			 && !_clock_armed) {
+
+				warning("no clock - the creation of the ", name(),
+				        " session cannot be completed");
+
+				/*
+				 * The parent's ID is released: the session is denied, so the
+				 * client must not wait for a capability that will never
+				 * arrive.
+				 */
+				if (session.id_at_parent.constructed())
+					session.id_at_parent.destruct();
+
+				session.phase = Session_state::SERVICE_DENIED;
+			}
+
+			return result;
+		}
 };
 
 

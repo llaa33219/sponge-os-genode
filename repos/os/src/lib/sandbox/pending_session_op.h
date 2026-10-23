@@ -163,6 +163,18 @@ class Sandbox::Pending_op_timer
 			if (_timer_client.constructed())
 				_timer_client.destruct();
 		}
+
+		/**
+		 * True while the timer is armed
+		 *
+		 * Without an armed timer, the deadline of the pending session
+		 * operations cannot be advanced and a session operation that the
+		 * parent took but has not answered yet is never completed. A
+		 * container that forwards a session request in that state must fail
+		 * the request instead of waiting for an answer that nobody is going
+		 * to deliver.
+		 */
+		bool armed() const { return _timer_client.constructed(); }
 };
 
 #endif /* _LIB__SANDBOX__PENDING_SESSION_OP_H_ */

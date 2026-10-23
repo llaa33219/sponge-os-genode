@@ -361,7 +361,7 @@ class Genode::Child : protected Rpc_object<Parent>,
 		 * Kind of session operation that the parent took but has not
 		 * answered yet
 		 */
-		enum class Op : unsigned char { None = 0, Upgrade, Close, Expired };
+		enum class Op : unsigned char { None = 0, Upgrade, Close, Expired, Create };
 
 		/**
 		 * Maximum number of session operations that may be pending at once
@@ -416,6 +416,20 @@ class Genode::Child : protected Rpc_object<Parent>,
 		 * answered is failed
 		 */
 		static constexpr unsigned TIMEOUT_MS = 5000;
+
+		/**
+		 * Time after which the CREATION of a session that the parent never
+		 * answered is failed
+		 *
+		 * The creation of a session is answered by the session's PROVIDER,
+		 * and the provider's work may involve I/O: on a slow storage chain
+		 * the creation of a 10 MB ROM takes seconds, not milliseconds
+		 * (measured on the product media with the medium limited to
+		 * 1000 KB/s: 9.5 MB / 1 MB/s). The deadline of the close and the
+		 * quota upgrade - which bound the parent's own bookkeeping - is
+		 * therefore not the right bound for a creation.
+		 */
+		static constexpr unsigned CREATE_TIMEOUT_MS = 60000;
 
 		bool _register_pending_op(Client::Id id, Op op, Session_state *session);
 
@@ -579,7 +593,31 @@ class Genode::Child : protected Rpc_object<Parent>,
 					if (session.phase == Session_state::CLOSE_REQUESTED)
 						_service.wakeup();
 
+					/*
+					 * A session whose creation the provider took but has not
+					 * answered yet is completed by the container's clock:
+					 * the provider answers a capability request with the
+					 * session's capability as soon as it has created the
+					 * session.
+					 */
+					if (session.phase == Session_state::CREATE_REQUESTED
+					 && _service.probe_at_parent(session)
+					      == Service::Parent_state::Pending) {
+						_child._register_pending_op(session.id_at_client(),
+						                            Op::Create, &session);
+					}
+
 					return Ok();
+				}
+
+				Parent_state probe_at_parent(Session_state &session) override
+				{
+					return _service.probe_at_parent(session);
+				}
+
+				bool complete_create(Session_state &session) override
+				{
+					return _service.complete_create(session);
 				}
 
 				/**

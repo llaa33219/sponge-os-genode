@@ -128,6 +128,26 @@ class Genode::Service : public Ram_transfer::Account,
 		virtual void wakeup() { }
 
 		virtual bool operator == (Service const &other) const { return this == &other; }
+
+		/**
+		 * Complete the creation of a session that the parent took but has
+		 * not answered yet
+		 *
+		 * A service that forwards the session request to the parent may
+		 * receive the parent's answer asynchronously: the parent takes the
+		 * request, the session's provider creates the session later, and the
+		 * capability becomes available afterwards. The container that
+		 * forwarded the request polls the parent for the completion of the
+		 * operation - this method is the hook that performs this poll.
+		 *
+		 * The default implementation reports "not completed": a service that
+		 * does not forward session requests to a parent has nothing to
+		 * complete.
+		 *
+		 * \return true if the session became available, false if the
+		 *         operation is still in flight
+		 */
+		virtual bool complete_create(Session_state &) { return false; }
 };
 
 
@@ -361,39 +381,60 @@ class Genode::Try_parent_service : public Service
 			switch (session.phase) {
 
 			case Session_state::CREATE_REQUESTED:
-
+			{
 				session.async_client_notify = true;
 
 				session.id_at_parent.construct(session.parent_client,
 				                               _env.id_space());
 
 				/*
-				 * The request is forwarded to the parent and waited for.
+				 * The request is forwarded to the parent WITHOUT waiting for
+				 * the parent's answer.
 				 *
-				 * The capability of a session that the parent creates
-				 * asynchronously is delivered through the parent's
-				 * 'session_cap' answer, which the client picks up. A
-				 * parent-provided session has no server-side ID, so the
-				 * capability cannot be delivered through
-				 * 'deliver_session_cap' - the wait below is the only
-				 * completion channel for it.
+				 * This function runs on the container's single entrypoint,
+				 * which serves every child's session plumbing AND the
+				 * containment alarm. A parent that has taken the request but
+				 * whose provider has not acted on it yet may never answer -
+				 * a container that parks here takes its whole subtree down,
+				 * silently and forever.
+				 *
+				 * The parent's answer is therefore taken as it comes: a valid
+				 * capability means the session is available, an invalid
+				 * capability means the request is in flight at the parent.
+				 * The completion of an in-flight request is driven by the
+				 * container's own clock, which polls the parent for the
+				 * session's capability.
 				 */
-				_env.try_session(name().string(),
-				                 session.id_at_parent->id(),
-				                 Session_state::Server_args(session).string(),
-				                 session.affinity()).with_result(
+				Session_state::Server_args const server_args(session);
+				Parent::Session_args const args(server_args.string());
 
-					[&] (Session_capability c) {
-						session.cap = c;
-						session.phase = Session_state::AVAILABLE;
-					},
-					[&] (Session_error e) {
-						session.id_at_parent.destruct();
-						session.phase = session_phase_from_error(e);
-						result = result_from_error(e);
-					}
-				);
+				if (!args.valid_string()) {
+					warning(name().string(),
+					        " session denied because of truncated arguments");
+					session.id_at_parent.destruct();
+					session.phase = Session_state::SERVICE_DENIED;
+					break;
+				}
+
+				_env.parent().session(session.id_at_parent->id(),
+				                      name().string(), args,
+				                      session.affinity()).with_result(
+
+				[&] (Session_capability c) {
+					if (!c.valid())
+						return;
+
+					session.cap = c;
+					session.phase = Session_state::AVAILABLE;
+				},
+				[&] (Session_error e) {
+					session.id_at_parent.destruct();
+					session.phase = session_phase_from_error(e);
+					result = result_from_error(e);
+				}
+			);
 				break;
+			}
 
 			case Session_state::UPGRADE_REQUESTED:
 				{
@@ -543,6 +584,38 @@ class Genode::Try_parent_service : public Service
 			);
 
 			return state;
+		}
+
+		bool complete_create(Session_state &session) override
+		{
+			if (!session.id_at_parent.constructed())
+				return false;
+
+			bool completed = false;
+
+			/*
+			 * The parent answers a capability request with the session's
+			 * capability as soon as the provider has created the session. An
+			 * invalid capability without an error means that the session is
+			 * not ready yet.
+			 */
+			_env.parent().session_cap(session.id_at_parent->id()).with_result(
+				[&] (Capability<Session> cap) {
+					if (!cap.valid())
+						return;
+
+					session.cap   = cap;
+					session.phase = Session_state::AVAILABLE;
+
+					if (session.ready_callback)
+						session.ready_callback->session_ready(session);
+
+					completed = true;
+				},
+				[&] (Parent::Session_cap_error) { }
+			);
+
+			return completed;
 		}
 };
 

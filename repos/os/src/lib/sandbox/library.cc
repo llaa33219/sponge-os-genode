@@ -90,6 +90,17 @@ struct Genode::Sandbox::Library : ::Sandbox::State_reporter::Producer,
 	Pending_op_timer _pending_op_timer { _env, _children };
 
 	/*
+	 * State of the clock that advances the deadline of the pending session
+	 * operations
+	 *
+	 * The parent services consult this flag: a session request that this
+	 * sandbox forwards to its parent is completed by the clock above. A
+	 * sandbox without a clock cannot complete such a request and must fail
+	 * it instead of waiting for an answer that nobody is going to deliver.
+	 */
+	bool _clock_armed { false };
+
+	/*
 	 * Internal representation of the configuration
 	 */
 	Config_model _config_model { };
@@ -222,7 +233,8 @@ struct Genode::Sandbox::Library : ::Sandbox::State_reporter::Producer,
 	 */
 	Parent_service &create_parent_service(Service::Name const &name) override
 	{
-		return *new (_heap) Parent_service(_parent_services, _env, name);
+		return *new (_heap) Parent_service(_parent_services, _env, name,
+		                                   _clock_armed);
 	}
 
 	/**
@@ -453,6 +465,7 @@ void Genode::Sandbox::Library::apply_config(Node const &config)
 	 * fatal.
 	 */
 	_pending_op_timer.arm();
+	_clock_armed = _pending_op_timer.armed();
 
 	/*
 	 * After importing the new configuration, servers may have disappeared

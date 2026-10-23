@@ -662,6 +662,21 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 
 		Assigned_quota assigned_quota() const { return _resources.assigned_quota; }
 
+		/**
+		 * Update the bootstrapping state of the child
+		 *
+		 * A child whose environment sessions arrive asynchronously - the
+		 * sessions the parent creates on demand - becomes active after
+		 * 'try_start()' has run. The state must follow the child's
+		 * activity: a child that is not 'alive' is not sent a heartbeat and
+		 * would never be able to answer one.
+		 */
+		void _refresh_state()
+		{
+			if (_state == State::RAM_INITIALIZED && _child.active())
+				_state = State::ALIVE;
+		}
+
 		void try_start()
 		{
 			if (_state == State::INITIAL) {
@@ -752,6 +767,7 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 		 */
 		void expire_pending_ops(unsigned elapsed_ms)
 		{
+			_refresh_state();
 			_child.expire_pending_ops(elapsed_ms);
 		}
 
@@ -767,6 +783,8 @@ class Sandbox::Child : Child_policy, Routed_service::Wakeup
 
 		void heartbeat(unsigned now_ms, unsigned rate_ms)
 		{
+			_refresh_state();
+
 			if (_heartbeat_expected())
 				_child.heartbeat();
 

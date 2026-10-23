@@ -75,6 +75,15 @@ struct Genode::Local_connection_base : Noncopyable
 				if (_session_state->alive())
 					break;
 
+				/*
+				 * A session whose creation is still in flight at the
+				 * provider is established: the client waits for the
+				 * provider's answer. Another attempt would request the
+				 * session a second time.
+				 */
+				if (_session_state->phase == Session_state::CREATE_REQUESTED)
+					break;
+
 				switch (_session_state->phase) {
 
 				case Session_state::INSUFFICIENT_RAM_QUOTA:
@@ -97,7 +106,12 @@ struct Genode::Local_connection_base : Noncopyable
 
 		void close()
 		{
-			if (_session_state->alive()) {
+			/*
+			 * A session whose creation is still in flight at the provider
+			 * exists there as well and must be closed there.
+			 */
+			if (_session_state->alive()
+			 || _session_state->phase == Session_state::CREATE_REQUESTED) {
 				_session_state->phase = Session_state::CLOSE_REQUESTED;
 				if (_session_state->service().initiate_request(*_session_state).failed())
 					warning("unable to initiate ", _session_state->service().name(), " close request");
