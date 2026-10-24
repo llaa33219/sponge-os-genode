@@ -773,9 +773,14 @@ void Child::_resolve_pending_op(Pending_op &entry)
 		 * generic probe below cannot answer this question: the session is
 		 * in flight at the parent as long as the provider has not acted on
 		 * the request.
+		 *
+		 * The pending operation is cleared by the ready callback that the
+		 * completion fires - the resolution must not clear it here: a
+		 * refused request is re-issued (with a bigger quota) from within
+		 * that callback, and the re-issue replaces the session state that
+		 * the pending operation refers to.
 		 */
-		if (session.service().complete_create(session))
-			_clear_pending_op(&session);
+		session.service().complete_create(session);
 
 		return;
 	}

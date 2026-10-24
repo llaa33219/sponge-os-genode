@@ -646,8 +646,18 @@ class Genode::Child : protected Rpc_object<Parent>,
 				/**
 				 * Session_state::Ready_callback
 				 */
-				void session_ready(Session_state &) override
+				void session_ready(Session_state &session) override
 				{
+					/*
+					 * The pending operation of this request is completed:
+					 * the request was either fulfilled or refused. The
+					 * operation must be cleared HERE - the resolution that
+					 * delivered this notification is still on the stack, and
+					 * a re-issue below replaces the session state (the
+					 * pending operation refers to it by pointer).
+					 */
+					_child._clear_pending_op(&session);
+
 					/*
 					 * The provider refused the session because the quota was
 					 * too small: every hop of the chain of providers takes a
@@ -655,8 +665,11 @@ class Genode::Child : protected Rpc_object<Parent>,
 					 * again with a bigger quota. The refusal may arrive long
 					 * after the request was issued.
 					 */
-					if (_connection && _connection->reissue())
-						return;
+					if (session.phase == Session_state::INSUFFICIENT_RAM_QUOTA
+					 || session.phase == Session_state::INSUFFICIENT_CAP_QUOTA) {
+						if (_connection && _connection->reissue())
+							return;
+					}
 
 					_child._try_construct_env_dependent_members();
 				}
