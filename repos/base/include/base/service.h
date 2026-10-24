@@ -540,12 +540,18 @@ class Genode::Try_parent_service : public Service
 
 			case Session_state::UPGRADE_REQUESTED:
 			case Session_state::CLOSE_REQUESTED:
+			case Session_state::SERVICE_DENIED:
 				/*
 				 * The LOCAL phase says nothing about the state of the
 				 * session at the parent: the request may still be in
 				 * flight there, or the parent may have acted on it
 				 * already (the session is gone). The parent is the only
 				 * authority on that - ask it below.
+				 *
+				 * A session whose creation ran into its deadline is denied
+				 * LOCALLY while the parent may still own it (the close of
+				 * such a session is in flight at the parent). The parent
+				 * must be asked before the session state is destroyed.
 				 */
 				break;
 
@@ -553,7 +559,6 @@ class Genode::Try_parent_service : public Service
 			case Session_state::CAP_HANDED_OUT:
 				break;
 
-			case Session_state::SERVICE_DENIED:
 			case Session_state::INSUFFICIENT_RAM_QUOTA:
 			case Session_state::INSUFFICIENT_CAP_QUOTA:
 			case Session_state::CLOSED:
@@ -612,7 +617,41 @@ class Genode::Try_parent_service : public Service
 
 					completed = true;
 				},
-				[&] (Parent::Session_cap_error) { }
+				[&] (Parent::Session_cap_error e) {
+
+					/*
+					 * The parent refused the session. The request is
+					 * resolved as a failure - it is never left pending:
+					 * the client waits for the session's capability and
+					 * must learn about the refusal.
+					 *
+					 * The error tells the client WHY the session was
+					 * refused: a client that asks for a session with a
+					 * quota that is too small for the chain of providers
+					 * (every hop takes a part of the donation) asks again
+					 * with a bigger one.
+					 */
+					switch (e) {
+					case Parent::Session_cap_error::INSUFFICIENT_RAM:
+						session.phase = Session_state::INSUFFICIENT_RAM_QUOTA;
+						break;
+					case Parent::Session_cap_error::INSUFFICIENT_CAPS:
+						session.phase = Session_state::INSUFFICIENT_CAP_QUOTA;
+						break;
+					case Parent::Session_cap_error::DENIED:
+						session.phase = Session_state::SERVICE_DENIED;
+						break;
+					}
+
+					/* the parent destroyed its side of the session */
+					if (session.id_at_parent.constructed())
+						session.id_at_parent.destruct();
+
+					if (session.ready_callback)
+						session.ready_callback->session_ready(session);
+
+					completed = true;
+				}
 			);
 
 			return completed;

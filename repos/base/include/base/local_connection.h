@@ -37,6 +37,20 @@ struct Genode::Local_connection_base : Noncopyable
 
 		Constructible<Session_state> _session_state { };
 
+		/*
+		 * The parameters of the session request. They are kept because the
+		 * request may have to be issued again: a provider that refuses the
+		 * session because the quota is too small is asked again with a
+		 * bigger quota.
+		 */
+		Service                    &_service;
+		Id_space<Parent::Client>   &_id_space;
+		Parent::Client::Id          _id;
+		Args                        _args;
+		Affinity                    _affinity;
+		Session::Label              _label;
+		Session::Resources          _resources;
+
 	private:
 
 		static Args _init_args(Args const &args, Session::Resources resources)
@@ -62,15 +76,18 @@ struct Genode::Local_connection_base : Noncopyable
 		                      Args const &args, Affinity const &affinity,
 		                      Session::Label             const &label,
 		                      Session::Resources                resources)
+		:
+			_service(service), _id_space(id_space), _id(id), _args(args),
+			_affinity(affinity), _label(label), _resources(resources)
 		{
 			enum { NUM_ATTEMPTS = 10 };
 			for (unsigned i = 0; i < NUM_ATTEMPTS; i++) {
-				_session_state.construct(service, id_space, id, label,
-				                         _init_args(args, resources),
-				                         affinity);
+				_session_state.construct(_service, _id_space, _id, _label,
+				                         _init_args(_args, _resources),
+				                         _affinity);
 
 				if (_session_state->service().initiate_request(*_session_state).failed())
-					warning("unable to initiate ", service.name(), " session");
+					warning("unable to initiate ", _service.name(), " session");
 
 				if (_session_state->alive())
 					break;
@@ -87,11 +104,11 @@ struct Genode::Local_connection_base : Noncopyable
 				switch (_session_state->phase) {
 
 				case Session_state::INSUFFICIENT_RAM_QUOTA:
-					resources.ram_quota.value += 4096;
+					_resources.ram_quota.value += 4096;
 					break;
 
 				case Session_state::INSUFFICIENT_CAP_QUOTA:
-					resources.cap_quota.value += 1;
+					_resources.cap_quota.value += 1;
 					break;
 
 				default: break;
@@ -100,8 +117,45 @@ struct Genode::Local_connection_base : Noncopyable
 
 			if (_session_state->phase == Session_state::INSUFFICIENT_RAM_QUOTA
 			 || _session_state->phase == Session_state::INSUFFICIENT_CAP_QUOTA)
-				warning("giving up to increase session quota for ", service.name(), " session "
+				warning("giving up to increase session quota for ", _service.name(), " session "
 				        "after ", (int)NUM_ATTEMPTS, " attempts");
+		}
+
+	public:
+
+		/**
+		 * Request the session again with a bigger quota
+		 *
+		 * A provider refuses a session whose quota is too small: every hop
+		 * of the chain of providers takes a part of the donation, so the
+		 * request has to carry more. The refusal may arrive long after the
+		 * request was issued (the provider answers asynchronously), which is
+		 * why the request can be issued again here.
+		 *
+		 * \return true if the session was requested again
+		 */
+		bool reissue()
+		{
+			if (!_session_state.constructed())
+				return false;
+
+			if (_session_state->phase == Session_state::INSUFFICIENT_RAM_QUOTA)
+				_resources.ram_quota.value += 4096;
+
+			else if (_session_state->phase == Session_state::INSUFFICIENT_CAP_QUOTA)
+				_resources.cap_quota.value += 1;
+
+			else
+				return false;
+
+			_session_state.construct(_service, _id_space, _id, _label,
+			                         _init_args(_args, _resources),
+			                         _affinity);
+
+			if (_session_state->service().initiate_request(*_session_state).failed())
+				warning("unable to initiate ", _service.name(), " session");
+
+			return true;
 		}
 
 		void close()
@@ -123,7 +177,7 @@ struct Genode::Local_connection_base : Noncopyable
 
 
 template <typename CONNECTION>
-class Genode::Local_connection : Local_connection_base
+class Genode::Local_connection : public Local_connection_base
 {
 	private:
 

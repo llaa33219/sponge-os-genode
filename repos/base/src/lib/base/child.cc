@@ -317,11 +317,20 @@ Parent::Session_cap_result Child::session_cap(Client::Id id)
 				Session_state::Phase const phase = session.phase;
 
 				/*
-				 * Implicity discard the session request when delivering an
-				 * exception because the exception will trigger the deallocation
-				 * of the session ID at the child anyway.
+				 * A session whose close is still in flight at the parent
+				 * must not be destroyed here: the close operation still
+				 * needs the session state (and its parent-side ID). The
+				 * state is destroyed by the completion of the close.
 				 */
-				_revert_quota_and_destroy(session);
+				if (!_pending_close_op(&session)) {
+
+					/*
+					 * Implicity discard the session request when delivering an
+					 * exception because the exception will trigger the deallocation
+					 * of the session ID at the child anyway.
+					 */
+					_revert_quota_and_destroy(session);
+				}
 
 				switch (phase) {
 				case Session_state::SERVICE_DENIED:         return Session_cap_error::DENIED;
@@ -713,6 +722,20 @@ void Child::_clear_pending_op(Session_state const *session)
 }
 
 
+bool Child::_pending_close_op(Session_state const *session) const
+{
+	for (auto const &entry : _pending_ops) {
+
+		if (entry.op != Op::Close)
+			continue;
+
+		if (entry.session == session)
+			return true;
+	}
+	return false;
+}
+
+
 bool Child::_pending_op_expired(Client::Id id) const
 {
 	for (auto const &entry : _pending_ops) {
@@ -863,18 +886,34 @@ void Child::_expire_pending_op(Pending_op &entry)
 		        "within ", entry.deadline_ms, " ms");
 
 		/*
-		 * The client is released with a denial: it waits for the session's
-		 * capability and must not wait forever.
+		 * The session is closed at the parent and the client is released
+		 * with a denial.
 		 *
-		 * The parent's ID must not be released here: the parent may still
-		 * create the session, and the ID must not be reused for another
-		 * session in the meantime.
+		 * The session state is NOT destroyed here: the close operation
+		 * still needs it, and destroying it would release the parent's ID
+		 * while the parent may still create the session. The close
+		 * operation keeps the state alive until the parent's answer
+		 * destroys it.
 		 */
+		session.phase = Session_state::CLOSE_REQUESTED;
+		if (session.service().initiate_request(session).failed())
+			warning("failed to initiate close request: ", session);
+
+		if (session.phase == Session_state::CLOSE_REQUESTED)
+			_register_pending_op(session.id_at_client(), Op::Close, &session);
+
 		session.phase = Session_state::SERVICE_DENIED;
 
 		if (session.ready_callback)
 			session.ready_callback->session_ready(session);
-		break;
+
+		/*
+		 * The operation of this entry is now the close operation that was
+		 * registered above (the registry holds one operation per session).
+		 * The generic handling below would mark it as expired - the close
+		 * must not be abandoned, the parent's answer destroys the session.
+		 */
+		return;
 
 	case Op::None:
 	case Op::Expired:

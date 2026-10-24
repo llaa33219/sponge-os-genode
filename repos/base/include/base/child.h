@@ -446,6 +446,15 @@ class Genode::Child : protected Rpc_object<Parent>,
 		 */
 		void _clear_pending_op(Session_state const *session);
 
+		/**
+		 * Return true if the close of the given session is still in flight
+		 *
+		 * The lookup is by session pointer: the client-side ID is not a
+		 * reliable substitute - the teardown of a child discards the
+		 * client-side ID of a session whose close is still pending.
+		 */
+		bool _pending_close_op(Session_state const *session) const;
+
 		bool _pending_op_expired(Client::Id id) const;
 
 		void _resolve_pending_op(Pending_op &entry);
@@ -533,6 +542,20 @@ class Genode::Child : protected Rpc_object<Parent>,
 			{
 				Child   &_child;
 				Service &_service;
+
+				/*
+				 * The connection that owns the session state. It is set
+				 * after the connection has been constructed (the connection
+				 * takes the service as its service).
+				 */
+				Local_connection_base *_connection = nullptr;
+
+				void set_connection(Local_connection_base *connection) {
+					_connection = connection;
+				}
+
+				Env_service(Env_service const &) = delete;
+				Env_service &operator = (Env_service const &) = delete;
 
 				Env_service(Child &child, Service &service)
 				:
@@ -625,6 +648,16 @@ class Genode::Child : protected Rpc_object<Parent>,
 				 */
 				void session_ready(Session_state &) override
 				{
+					/*
+					 * The provider refused the session because the quota was
+					 * too small: every hop of the chain of providers takes a
+					 * part of the donation, so the request has to be issued
+					 * again with a bigger quota. The refusal may arrive long
+					 * after the request was issued.
+					 */
+					if (_connection && _connection->reissue())
+						return;
+
 					_child._try_construct_env_dependent_members();
 				}
 
@@ -724,6 +757,7 @@ class Genode::Child : protected Rpc_object<Parent>,
 						_env_service.construct(_child, route.service);
 						_connection.construct(*_env_service, _child._id_space, _client_id,
 						                      _args, affinity, route.label);
+						_env_service->set_connection(&*_connection);
 					},
 					[&] {
 						error(_child._policy.name(), ": ", _service_name(), " "
