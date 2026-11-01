@@ -25,6 +25,49 @@
 using namespace Core;
 
 
+namespace {
+
+	/*
+	 * Source of RPC object keys
+	 *
+	 * Two invariants make the client-side key -> capability lookup sound:
+	 *
+	 * - Uniqueness: a key is never reused for a different RPC object. A
+	 *   lookup hit names exactly the server incarnation the key was
+	 *   issued for and can never alias a stale entry of a dead one.
+	 *
+	 * - Disjointness (upstream issue #5779): factory keys never collide
+	 *   with the pager's keys, which are plain 'cap_sel' values below
+	 *   '2^Core_cspace::NUM_CORE_SEL_LOG2'. The counter starts at that
+	 *   boundary and only grows, so both key populations stay separate.
+	 *
+	 * The range ends at 'Rpc_obj_key::INVALID', which is never issued, and
+	 * never wraps into the 'cap_sel' range (32-bit safe).
+	 */
+	addr_t next_rpc_obj_key_value()
+	{
+		addr_t const first = 1UL << Core_cspace::NUM_CORE_SEL_LOG2;
+
+		static Mutex  mutex { };
+		static addr_t counter = first;
+
+		Mutex::Guard guard(mutex);
+
+		if (counter == Rpc_obj_key::INVALID)
+			return Rpc_obj_key::INVALID;
+
+		addr_t const key = counter;
+
+		counter = key + 1;
+
+		if (counter < first || counter == Rpc_obj_key::INVALID)
+			counter = Rpc_obj_key::INVALID;
+
+		return key;
+	}
+}
+
+
 Rpc_cap_factory::Alloc_result Rpc_cap_factory::alloc(Native_capability ep)
 {
 	if (!ep.valid())
@@ -32,29 +75,24 @@ Rpc_cap_factory::Alloc_result Rpc_cap_factory::alloc(Native_capability ep)
 
 	Mutex::Guard guard(_mutex);
 
-	/*
-	 * Pager code uses create_rpc_obj_cap with a cap_sel as rpc obj key. To
-	 * avoid collision during destruction, use the same allocator.
-	 */
-	auto cap_sel = platform_specific().core_sel_alloc().alloc();
+	Rpc_obj_key const rpc_obj_key(next_rpc_obj_key_value());
 
-	return cap_sel.convert<Rpc_cap_factory::Alloc_result>([&](auto const result) {
-		auto rpc_obj_key = Rpc_obj_key(result);
+	if (!rpc_obj_key.valid())
+		return Alloc_result(Alloc_error::OUT_OF_CAPS);
 
-		auto cap = Capability_space::create_rpc_obj_cap(ep, rpc_obj_key);
+	auto cap = Capability_space::create_rpc_obj_cap(ep, rpc_obj_key);
 
-		try {
-			if (cap.valid()) {
-				_pool.insert(new (_entry_slab) Entry(cap));
-				return Alloc_result(cap);
-			}
+	try {
+		if (cap.valid()) {
+			_pool.insert(new (_entry_slab) Entry(cap));
+			return Alloc_result(cap);
 		}
-		catch (Out_of_caps) { return Alloc_result(Alloc_error::OUT_OF_CAPS); }
-		catch (Out_of_ram)  { return Alloc_result(Alloc_error::OUT_OF_RAM);  }
-		catch (Denied)      { return Alloc_result(Alloc_error::DENIED);      }
+	}
+	catch (Out_of_caps) { return Alloc_result(Alloc_error::OUT_OF_CAPS); }
+	catch (Out_of_ram)  { return Alloc_result(Alloc_error::OUT_OF_RAM);  }
+	catch (Denied)      { return Alloc_result(Alloc_error::DENIED);      }
 
-		return Alloc_result( Alloc_error::DENIED );
-	}, [](auto) { return Alloc_result(Alloc_error::DENIED); });
+	return Alloc_result( Alloc_error::DENIED );
 }
 
 
@@ -72,12 +110,11 @@ void Rpc_cap_factory::free(Native_capability cap)
 
 		_pool.remove(ptr);
 
-		/* revert Rpc_cap_factory::alloc Cap_sel allocation */
-		if (cap.data()) {
-			Cap_sel sel (unsigned(Capability_space::rpc_obj_key(*cap.data()).value()));
-			platform_specific().core_sel_alloc().free(sel);
-		}
-
+		/*
+		 * The key comes from the monotonic range of
+		 * 'next_rpc_obj_key_value' and is never released, so that it
+		 * remains unique for the lifetime of the system.
+		 */
 		Capability_space::destroy_rpc_obj_cap(cap);
 
 		entry_ptr = ptr;
