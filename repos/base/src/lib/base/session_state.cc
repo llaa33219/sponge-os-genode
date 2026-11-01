@@ -12,6 +12,7 @@
  */
 
 #include <base/session_state.h>
+#include <base/child.h>
 #include <base/service.h>
 #include <util/arg_string.h>
 
@@ -133,6 +134,16 @@ void Session_state::generate_server_side_info(Generator &g, Detail detail) const
 void Session_state::destroy()
 {
 	/*
+	 * Sever the requester's pending-operation bookkeeping first: an
+	 * operation refers to this state by pointer and must never see the
+	 * memory that is released below. In-place replacement (re-issue)
+	 * deliberately keeps the operations as stale evidence - only real
+	 * destruction severs them.
+	 */
+	if (pending_op_owner)
+		pending_op_owner->_clear_pending_op(this);
+
+	/*
 	 * A session may be destroyed only if the parent has released its
 	 * side of the session. A live parent-side ID would leave a dangling
 	 * entry in the parent's ID space, which is corrupted as soon as the
@@ -177,6 +188,13 @@ void Session_state::destroy()
 }
 
 
+unsigned Session_state::_next_generation()
+{
+	static unsigned count = 0;
+	return ++count;
+}
+
+
 Session_state::Session_state(Service                  &service,
                              Id_space<Parent::Client> &client_id_space,
                              Parent::Client::Id        client_id,
@@ -188,5 +206,6 @@ Session_state::Session_state(Service                  &service,
 	_donated_ram_quota(ram_quota_from_args(args.string())),
 	_donated_cap_quota(cap_quota_from_args(args.string())),
 	_id_at_client(*this, client_id_space, client_id),
-	_label(label), _args(args), _affinity(affinity)
+	_label(label), _args(args), _affinity(affinity),
+	generation(_next_generation())
 { }

@@ -654,6 +654,8 @@ bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 	unsigned const deadline_ms = (op == Op::Create) ? CREATE_TIMEOUT_MS
 	                                                : TIMEOUT_MS;
 
+	session->pending_op_owner = this;
+
 	/* an operation for this session replaces the previous one */
 	for (auto &entry : _pending_ops) {
 
@@ -661,7 +663,8 @@ bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 			continue;
 
 		if (entry.id == id) {
-			entry = Pending_op { id, deadline_ms, 0, op, false, session };
+			entry = Pending_op { id, deadline_ms, 0, op, false, session,
+			                     session->generation };
 			return true;
 		}
 	}
@@ -671,7 +674,8 @@ bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 		if (entry.op != Op::None)
 			continue;
 
-		entry = Pending_op { id, deadline_ms, 0, op, false, session };
+		entry = Pending_op { id, deadline_ms, 0, op, false, session,
+		                     session->generation };
 		return true;
 	}
 
@@ -686,7 +690,8 @@ bool Child::_register_pending_op(Client::Id id, Op op, Session_state *session)
 	                                                                : "close"),
 	        " of session ", id);
 
-	Pending_op expired { id, deadline_ms, deadline_ms, op, false, session };
+	Pending_op expired { id, deadline_ms, deadline_ms, op, false, session,
+	                     session->generation };
 	_expire_pending_op(expired);
 	return false;
 }
@@ -698,18 +703,33 @@ void Child::_clear_pending_op(Client::Id id)
 	if (id.value == Session_state::invalid_client_id.value)
 		return;
 
+	Session_state *session = nullptr;
+
 	for (auto &entry : _pending_ops) {
 
 		if (entry.op == Op::None)
 			continue;
 
-		if (entry.id == id)
+		if (entry.id == id) {
+			session = entry.session;
 			entry.op = Op::None;
+		}
 	}
+
+	if (!session)
+		return;
+
+	for (auto const &entry : _pending_ops)
+		if (entry.op != Op::None && entry.session == session)
+			return;
+
+	/* only the requester that registered the operations owns the link */
+	if (session->pending_op_owner == this)
+		session->pending_op_owner = nullptr;
 }
 
 
-void Child::_clear_pending_op(Session_state const *session)
+void Child::_clear_pending_op(Session_state *session)
 {
 	for (auto &entry : _pending_ops) {
 
@@ -719,6 +739,10 @@ void Child::_clear_pending_op(Session_state const *session)
 		if (entry.session == session)
 			entry.op = Op::None;
 	}
+
+	/* only the requester that registered the operations owns the link */
+	if (session->pending_op_owner == this)
+		session->pending_op_owner = nullptr;
 }
 
 
@@ -762,6 +786,14 @@ void Child::_resolve_pending_op(Pending_op &entry)
 {
 	Client::Id const id = entry.id;
 	Op const op = entry.op;
+
+	/* a replaced incarnation must never be acted upon */
+	if (entry.session->generation != entry.generation) {
+		warning(_policy.name(), ": stale session operation for a replaced "
+		        "session incarnation - dropping it");
+		entry.op = Op::None;
+		return;
+	}
 
 	Session_state &session = *entry.session;
 
@@ -854,6 +886,14 @@ void Child::_expire_pending_op(Pending_op &entry)
 {
 	Client::Id const id = entry.id;
 	Op const op = entry.op;
+
+	/* a replaced incarnation must never be acted upon */
+	if (entry.session->generation != entry.generation) {
+		warning(_policy.name(), ": stale session operation for a replaced "
+		        "session incarnation - dropping it");
+		entry.op = Op::None;
+		return;
+	}
 
 	Session_state &session = *entry.session;
 
@@ -1027,6 +1067,39 @@ void Child::session_response(Server::Id id, Session_response response)
 					        "already closed session: ", session);
 					break;
 				}
+
+			/*
+			 * The answer may name an incarnation that a re-issue has
+			 * replaced: a pending operation registered for the previous
+			 * generation is the evidence. Such an answer must never
+			 * destroy the replacement; only a close that THIS incarnation
+			 * initiated completes it. Operations of the replaced
+			 * incarnation are dropped.
+			 */
+			{
+				bool stale = false, owns_close = false;
+
+				for (auto &entry : _pending_ops) {
+
+					if (entry.op == Op::None || entry.session != &session)
+						continue;
+
+					if (entry.generation != session.generation) {
+						entry.op = Op::None;
+						stale = true;
+					} else if (entry.op == Op::Close || entry.op == Op::Expired)
+						owns_close = true;
+				}
+
+				if (session.phase == Session_state::CLOSE_REQUESTED)
+					owns_close = true;
+
+				if (stale && !owns_close) {
+					warning(_policy.name(), ": late close answer for a "
+					        "replaced session incarnation: ", session);
+					break;
+				}
+			}
 
 				session.phase = Session_state::CLOSED;
 

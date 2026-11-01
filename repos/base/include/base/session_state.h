@@ -27,6 +27,7 @@ namespace Genode {
 
 	class Session_state;
 	class Service;
+	class Child;
 }
 
 
@@ -82,6 +83,18 @@ class Genode::Session_state : public Parent::Client, public Parent::Server
 
 		Parent::Client parent_client { };
 
+		/*
+		 * Incarnation stamp of this state
+		 *
+		 * A state can be replaced in place (a re-issued request
+		 * reconstructs it) while a pending operation still names it by
+		 * pointer. The stamp tells that operation's incarnation from the
+		 * replacement occupying the same address.
+		 */
+		unsigned const generation;
+
+		static unsigned _next_generation();
+
 		enum Phase { CREATE_REQUESTED,
 		             SERVICE_DENIED,
 		             INSUFFICIENT_RAM_QUOTA,
@@ -103,6 +116,16 @@ class Genode::Session_state : public Parent::Client, public Parent::Server
 
 		Ready_callback  *ready_callback  = nullptr;
 		Closed_callback *closed_callback = nullptr;
+
+		/*
+		 * Requester whose pending-operation registry may refer to this
+		 * state by pointer ('Genode::Child'). Set at pending-operation
+		 * registration, cleared together with the last such operation.
+		 * 'destroy()' severs the operations through it before this
+		 * state's memory is released, so an operation never outlives the
+		 * state it points to.
+		 */
+		Child *pending_op_owner = nullptr;
 
 		/*
 		 * Pointer to session interface for sessions that are implemented

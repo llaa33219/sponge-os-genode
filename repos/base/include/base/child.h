@@ -272,6 +272,8 @@ class Genode::Child : protected Rpc_object<Parent>,
 {
 	private:
 
+		friend class Session_state;
+
 		using Local_rm = Local::Constrained_region_map;
 
 		struct Initial_thread_base : Interface
@@ -399,6 +401,9 @@ class Genode::Child : protected Rpc_object<Parent>,
 			 * vanished), so the operation cannot be looked up by ID alone.
 			 */
 			Session_state *session;
+
+			/* Session_state::generation the operation was issued for */
+			unsigned       generation;
 		};
 
 		/*
@@ -444,7 +449,7 @@ class Genode::Child : protected Rpc_object<Parent>,
 		 * substitute - the teardown of a child discards the client-side ID
 		 * of a session whose close is still pending.
 		 */
-		void _clear_pending_op(Session_state const *session);
+		void _clear_pending_op(Session_state *session);
 
 		/**
 		 * Return true if the close of the given session is still in flight
