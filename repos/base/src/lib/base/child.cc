@@ -924,7 +924,7 @@ void Child::_expire_pending_op(Pending_op &entry)
 		 */
 		break;
 
-	case Op::Create:
+	case Op::Create: {
 
 		warning(_policy.name(), ": create of ", session.service().name(),
 		        " (session ", id, ") failed - the provider did not answer "
@@ -944,13 +944,23 @@ void Child::_expire_pending_op(Pending_op &entry)
 		if (session.service().initiate_request(session).failed())
 			warning("failed to initiate close request: ", session);
 
-		if (session.phase == Session_state::CLOSE_REQUESTED)
-			_register_pending_op(session.id_at_client(), Op::Close, &session);
+		bool const close_in_flight = (session.phase == Session_state::CLOSE_REQUESTED);
 
+		/*
+		 * Release the client with the denial BEFORE the close operation
+		 * is registered: 'session_ready' clears the pending operations of
+		 * the session, which would silently drop a close operation
+		 * registered earlier. The close is registered afterwards so that
+		 * '_pending_close_op' reports the in-flight close and the session
+		 * state (and the parent-side ID) stays protected.
+		 */
 		session.phase = Session_state::SERVICE_DENIED;
 
 		if (session.ready_callback)
 			session.ready_callback->session_ready(session);
+
+		if (close_in_flight)
+			_register_pending_op(id, Op::Close, &session);
 
 		/*
 		 * The operation of this entry is now the close operation that was
@@ -959,6 +969,7 @@ void Child::_expire_pending_op(Pending_op &entry)
 		 * must not be abandoned, the parent's answer destroys the session.
 		 */
 		return;
+	}
 
 	case Op::None:
 	case Op::Expired:

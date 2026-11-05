@@ -1,0 +1,34 @@
+build { core init lib/ld test/child_pending_op }
+
+create_boot_directory
+
+install_config {
+config | prio_levels: 2
++ parent-provides
+  + service ROM
+  + service IRQ
+  + service IO_MEM
+  + service IO_PORT
+  + service PD
+  + service RM
+  + service CPU
+  + service LOG
+
++ default-route
+  + any-service
+    + parent
+    + any-child
+
++ default | caps: 100
+
++ start test | priority: -1 | ram: 10M
+  + binary test-child_pending_op
+-
+}
+
+build_boot_image [build_artifacts]
+
+run_genode_until "child-pending-op: VERDICT.*\n" 60
+
+grep_output {child-pending-op: VERDICT}
+compare_output_to {[init -> test] child-pending-op: VERDICT PASS}
