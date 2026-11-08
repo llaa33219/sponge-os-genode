@@ -184,6 +184,13 @@ struct Cached_fs_rom::Transfer final
 			_submit_next_packet();
 		}
 
+		~Transfer()
+		{
+			_cached_rom.transfer = nullptr;
+
+			_fs.close(_handle);
+		}
+
 		Path const &path() const { return _cached_rom.path; }
 
 		bool completed() const { return (_seek >= _size); }
@@ -389,6 +396,7 @@ struct Cached_fs_rom::Main final : Session_request_handler
 				new (heap) Transfer(transfers, *rom, fs, handle, rom->file_size);
 			}
 			catch (...) {
+				rom->transfer = nullptr;
 				fs.close(handle);
 				/* retry when next pending transfer completes */
 				return;
