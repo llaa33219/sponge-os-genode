@@ -215,6 +215,9 @@ class Backend
 
 		void sync()
 		{
+			if (!writeable())
+				return;
+
 			Block::Operation const operation { .type = Block::Operation::Type::SYNC };
 
 			(void)_synchronous_io(nullptr, operation);
