@@ -201,8 +201,17 @@ Platform_pd::Platform_pd(Accounted_mapped_ram_allocator &,
 	if (!_vm_space->constructed())
 		return;
 
-	for (unsigned i = 0; i < sizeof(_cspace_cnode_2nd) /
-	                         sizeof(_cspace_cnode_2nd[0]); i++) {
+	/*
+	 * Eagerly construct only the second-level CNodes that cover the
+	 * user cap-selector range: 'create_capability' asserts
+	 * 'sel < NUM_CAPS' (6144) and core-managed selectors stay below
+	 * 256, so '6144 / (1 << CSPACE_SIZE_LOG2_2ND)' (= 12) nodes of
+	 * 512 slots each cover every selector the PD can ever use.
+	 * Each node costs 16 KiB of CNode backing (Cnode_kobj::SIZE_LOG2
+	 * + CSPACE_SIZE_LOG2_2ND), so the eager set costs 192 KiB per PD
+	 * instead of 2 MiB for all '1 << CSPACE_SIZE_LOG2_1ST' (128) nodes.
+	 */
+	for (unsigned i = 0; i < 6144 / (1 << CSPACE_SIZE_LOG2_2ND); i++) {
 
 		platform_specific().core_sel_alloc().alloc().with_result([&](auto sel) {
 			/* add all 2nd level CSpace's to 1st level CSpace */
@@ -211,7 +220,8 @@ Platform_pd::Platform_pd(Accounted_mapped_ram_allocator &,
 			                               CSPACE_SIZE_LOG2_2ND,
 			                               platform().ram_alloc());
 
-			if (!_cspace_cnode_2nd->constructed())
+			/* a failed node is never copied into the 1st-level CNode */
+			if (!_cspace_cnode_2nd[i]->constructed())
 				return;
 
 			_cspace_cnode_1st->copy(platform_specific().core_cnode(),
@@ -234,7 +244,11 @@ Platform_pd::~Platform_pd()
 
 		for (unsigned i = 0; i < sizeof(_cspace_cnode_2nd) /
 		                         sizeof(_cspace_cnode_2nd[0]); i++) {
-			cspace_cnode_1st.remove(Cnode_index(i));
+
+			/* skip unconstructed entries and failed nodes (never copied) */
+			if (_cspace_cnode_2nd[i].constructed() &&
+			    _cspace_cnode_2nd[i]->constructed())
+				cspace_cnode_1st.remove(Cnode_index(i));
 
 			if (_cspace_cnode_2nd[i].constructed()) {
 				_cspace_cnode_2nd[i]->destruct(platform().ram_alloc(), true);

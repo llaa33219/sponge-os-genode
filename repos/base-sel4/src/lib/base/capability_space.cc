@@ -58,7 +58,12 @@ namespace {
 
 namespace {
 
-	class Sel_alloc : Bit_allocator<1UL << CSPACE_SIZE_LOG2>
+	/*
+	 * Match 'Local_capability_space' NUM_CAPS (6 * 1024): receive-path
+	 * selectors must stay inside the 12 eagerly constructed second-level
+	 * CNodes (6144 slots) of the PD's CSpace.
+	 */
+	class Sel_alloc : Bit_allocator<6 * 1024>
 	{
 		private:
 
