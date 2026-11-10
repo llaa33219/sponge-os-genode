@@ -325,8 +325,34 @@ struct Genode::Component_env : Env
 	{
 		Mutex::Guard guard(_mutex);
 
-		if (_parent.close(id) == Parent::Close_result::PENDING)
+		if (_parent.close(id) != Parent::Close_result::PENDING)
+			return;
+
+		/*
+		 * The parent answered the close request asynchronously. The
+		 * session is gone only when the parent reports an error for
+		 * 'session_cap' - an invalid capability without an error means
+		 * the close is still in flight (the session is in CLOSE_REQUESTED).
+		 *
+		 * The Blockade signal is shared by all sessions of the component
+		 * and by the sandbox-forwarded upgrade responses, so a wake-up may
+		 * be caused by an unrelated session. Returning on such a wake-up
+		 * would let the caller re-use the session ID while the parent
+		 * still holds it - the parent rejects the request with
+		 * "requested conflicting session ID", a component-fatal denial.
+		 * After every wake-up we therefore re-poll the session state and
+		 * re-block while the close is still pending.
+		 */
+		for (;;) {
 			_block_for_session();
+
+			bool const still_pending = _parent.session_cap(id).convert<bool>(
+				[&] (Capability<Session> cap) { return !cap.valid(); },
+				[&] (Parent::Session_cap_error) { return false; });
+
+			if (!still_pending)
+				return;
+		}
 	}
 
 	Parent::Close_result try_close(Parent::Client::Id id) override

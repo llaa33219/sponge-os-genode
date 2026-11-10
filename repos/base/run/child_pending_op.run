@@ -1,4 +1,4 @@
-build { core init lib/ld test/child_pending_op }
+build { core init lib/ld timer test/child_pending_op }
 
 create_boot_directory
 
@@ -19,7 +19,10 @@ config | prio_levels: 2
     + parent
     + any-child
 
-+ default | caps: 100
++ default | caps: 100 | ram: 10M
+
++ start timer | priority: 0 | ram: 1M
+  + provides | + service Timer
 
 + start test | priority: -1 | ram: 10M
   + binary test-child_pending_op
@@ -29,6 +32,25 @@ config | prio_levels: 2
 build_boot_image [build_artifacts]
 
 run_genode_until "child-pending-op: VERDICT.*\n" 60
+
+#
+# The close-completion race is gone only if the log holds no conflicting-ID
+# refusal at all (the pre-fix run prints 'requested conflicting session ID').
+#
+if {[regexp {requested conflicting session ID} $output]} {
+	puts stderr "child-pending-op: FAIL - output contains 'requested conflicting session ID'"
+	exit 1
+}
+
+#
+# A single failing check fails the verdict (the Root_proxy close-ordering
+# regression is red when the CLOSED response is held hostage by the provider
+# close).
+#
+if {[regexp {child-pending-op: FAIL } $output]} {
+	puts stderr "child-pending-op: FAIL - output contains a failing check"
+	exit 1
+}
 
 grep_output {child-pending-op: VERDICT}
 compare_output_to {[init -> test] child-pending-op: VERDICT PASS}

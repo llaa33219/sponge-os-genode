@@ -225,10 +225,46 @@ void Root_proxy::_handle_session_request(Node const &request, char const *type)
 
 		_id_space.apply<Session>(id, [&] (Session &session) {
 
+			/*
+			 * Answer 'CLOSED' before the provider close may block.
+			 *
+			 * The close below is a synchronous 'Root_client' RPC to
+			 * the local root interface. A provider whose close is slow
+			 * (a driver releasing hardware, for example) blocks this
+			 * dispatch loop, and with it the answer: the parent keeps
+			 * the session state in CLOSE_REQUESTED and its ID reserved
+			 * until 'session_response' arrives, so a late answer
+			 * stalls every subsequent session request of the client -
+			 * including creates under the same ID. Sending the answer
+			 * first releases the parent-side state immediately.
+			 *
+			 * The 'Session' wrapper outlives the close call: it holds
+			 * the session capability the call consumes. The wrapper is
+			 * destroyed before the next request is dispatched because
+			 * this dispatch loop is single-threaded - a request that
+			 * re-uses the ID cannot arrive between 'destroy' below and
+			 * the close call.
+			 */
+			_env.parent().session_response(id, Parent::Session_response::CLOSED);
+
 			Root_client(session.service.root).close(session.cap);
 
 			destroy(_session_slab, &session);
+		},
 
+		[&] /* ID not known here */ {
+
+			/*
+			 * The close can race ahead of its create: the parent
+			 * generates the request node from the session state's phase,
+			 * so a session that is created and closed before this
+			 * dispatch ran is represented by a 'close' request alone -
+			 * the create never reached the provider and no provider
+			 * session exists. The close must be answered 'CLOSED'
+			 * nonetheless: the parent-side session state is released
+			 * only by this answer. Without it the state stays in
+			 * CLOSE_REQUESTED forever and its ID is never freed.
+			 */
 			_env.parent().session_response(id, Parent::Session_response::CLOSED);
 		});
 	}

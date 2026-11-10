@@ -126,14 +126,173 @@ with_new_session(Child_policy::Name const &child_name, Service &service,
 
 				return fn(s);
 			},
-			[&] (Alloc_error e) -> Session_error {
-				switch (e) {
-				case Alloc_error::OUT_OF_RAM:  return Error::OUT_OF_RAM;
-				case Alloc_error::OUT_OF_CAPS: return Error::OUT_OF_CAPS;
-				case Alloc_error::DENIED:      break;
-				}
-				return Error::DENIED;
-			});
+		[&] (Alloc_error e) -> Session_error {
+			switch (e) {
+			case Alloc_error::OUT_OF_RAM:  return Error::OUT_OF_RAM;
+			case Alloc_error::OUT_OF_CAPS: return Error::OUT_OF_CAPS;
+			case Alloc_error::DENIED:      break;
+			}
+			return Error::DENIED;
+		});
+}
+
+
+namespace {
+
+	/**
+	 * Create request parked under a client-side ID whose old session is
+	 * still closing
+	 *
+	 * A create that arrives while the old session state still occupies the
+	 * ID (its close is in flight at the provider) cannot be created right
+	 * away: the ID space still maps the old state, and creating the new
+	 * session into the same ID would leak the old state and corrupt the
+	 * provider's bookkeeping. Refusing the create is not an option either
+	 * - the refusal ("requested conflicting session ID") is component-
+	 * fatal for the client. The request is therefore parked and re-driven
+	 * as soon as the late close destroys the old state
+	 * ('resume_parked_create'), which completes the create.
+	 *
+	 * The registry is keyed by the owning 'Child' (the client-side IDs of
+	 * different children overlap). 'Child' instances may be served by
+	 * different entrypoints, hence the mutex. It is an implementation
+	 * detail of the pending-create completion below, not shared state
+	 * between components.
+	 */
+	struct Parked_create
+	{
+		Genode::Child       *owner = nullptr;
+		Parent::Client::Id   id { ~0UL };
+		Parent::Service_name name { };
+		Parent::Session_args args { };
+		Affinity             affinity { };
+	};
+
+	enum { MAX_PARKED_CREATES = 4 };
+
+	struct Parked_creates
+	{
+		Mutex         mutex { };
+		Parked_create entries[MAX_PARKED_CREATES] { };
+	};
+
+	Parked_creates &parked_creates()
+	{
+		/*
+		 * Function-local static: the registry must also work in core,
+		 * where 'exec_static_constructors' is empty and a file-scope
+		 * 'Mutex' would stay zero-initialized - which is 'LOCKED'.
+		 */
+		static Parked_creates registry { };
+		return registry;
+	}
+
+
+	Parked_create *_find_parked_create(Parked_creates &registry,
+	                                  Genode::Child *owner, Parent::Client::Id id)
+	{
+		for (auto &parked : registry.entries)
+			if (parked.owner == owner && parked.id == id)
+				return &parked;
+
+		return nullptr;
+	}
+
+
+	bool park_create(Genode::Child *owner, Parent::Client::Id id,
+	                 Parent::Service_name const &name,
+	                 Parent::Session_args const &args,
+	                 Affinity const &affinity)
+	{
+		Parked_creates &registry = parked_creates();
+
+		Mutex::Guard guard(registry.mutex);
+
+		Parked_create *slot = _find_parked_create(registry, owner, id);
+
+		if (!slot)
+			for (auto &parked : registry.entries)
+				if (!parked.owner) { slot = &parked; break; }
+
+		/*
+		 * With no free slot the create is not parked: answering 'pending'
+		 * without ever completing the request would strand the client, so
+		 * the caller must fall through to the conflict refusal.
+		 */
+		if (!slot)
+			return false;
+
+		slot->owner    = owner;
+		slot->id       = id;
+		slot->name     = name;
+		slot->args     = args;
+		slot->affinity = affinity;
+		return true;
+	}
+
+
+	void drop_parked_create(Genode::Child *owner, Parent::Client::Id id)
+	{
+		Parked_creates &registry = parked_creates();
+
+		Mutex::Guard guard(registry.mutex);
+
+		if (Parked_create *slot = _find_parked_create(registry, owner, id))
+			slot->owner = nullptr;
+	}
+
+
+	void drop_parked_creates(Genode::Child *owner)
+	{
+		Parked_creates &registry = parked_creates();
+
+		Mutex::Guard guard(registry.mutex);
+
+		for (auto &parked : registry.entries)
+			if (parked.owner == owner)
+				parked.owner = nullptr;
+	}
+
+
+	/**
+	 * Re-drive the create parked for 'id' after the late close of the old
+	 * session completed
+	 *
+	 * The parked entry is consumed before the re-entry so a failure of the
+	 * re-driven create cannot park the same request twice. The completion
+	 * of the create is the new session state in the child's ID space (the
+	 * client polls 'session_cap'), or - if the create fails - its absence,
+	 * which the poll reports as an error.
+	 */
+	void resume_parked_create(Genode::Child *owner, Parent::Client::Id id)
+	{
+		if (id.value == Session_state::invalid_client_id.value)
+			return;
+
+		Parked_create parked { };
+
+		{
+			Parked_creates &registry = parked_creates();
+
+			Mutex::Guard guard(registry.mutex);
+
+			Parked_create *slot = _find_parked_create(registry, owner, id);
+			if (!slot)
+				return;
+
+			parked = *slot;
+			slot->owner = nullptr;
+		}
+
+		/*
+		 * The result is not consumed here: the completion of the create
+		 * is observed by the client via 'session_cap' on the ID.
+		 */
+		Parent::Session_result const result =
+			owner->session(parked.id, parked.name, parked.args, parked.affinity);
+
+		(void)result;
+	}
 }
 
 
@@ -144,6 +303,33 @@ Parent::Session_result Child::session(Parent::Client::Id id,
 {
 	if (!name.valid_string() || !args.valid_string() || _pd.closed())
 		return Session_error::DENIED;
+
+	/*
+	 * A create that arrives under an ID whose old session is still
+	 * closing is parked and answered 'pending' instead of dying with
+	 * "requested conflicting session ID". The park is completed by
+	 * 'resume_parked_create' when the late close destroys the old state.
+	 * A create under an ID that is free again supersedes a stale parked
+	 * request for that ID. Only a collision with a closing session is
+	 * deferred this way - a collision with a live session remains a
+	 * conflict ('with_new_session').
+	 */
+	bool parked = false;
+
+	_id_space.apply<Session_state>(id,
+		[&] (Session_state &session) {
+
+			bool const closing = session.phase == Session_state::CLOSE_REQUESTED
+			                  || session.phase == Session_state::CLOSED
+			                  || _pending_close_op(&session);
+
+			if (closing)
+				parked = park_create(this, id, name, args, affinity);
+		},
+		[&] /* ID not yet used */ { drop_parked_create(this, id); });
+
+	if (parked)
+		return Session_capability();
 
 	char argbuf[Parent::Session_args::MAX_SIZE];
 
@@ -524,6 +710,8 @@ Parent::Upgrade_result Child::upgrade(Client::Id id, Parent::Upgrade_args const 
 
 void Child::_revert_quota_and_destroy(Pd_session &pd, Session_state &session)
 {
+	Parent::Client::Id const id = session.id_at_client_if_valid();
+
 	Ram_transfer::Remote_account   ref_ram_account(_policy.ref_account(), _policy.ref_account_cap());
 	Ram_transfer::Account     &service_ram_account = session.service();
 	Ram_transfer::Remote_account child_ram_account(pd, pd_session_cap());
@@ -575,6 +763,12 @@ void Child::_revert_quota_and_destroy(Pd_session &pd, Session_state &session)
 
 	session.destroy();
 	_policy.session_state_changed();
+
+	/*
+	 * The ID is free now: a create parked for it by a close-in-flight
+	 * collision is re-driven and completes here.
+	 */
+	resume_parked_create(this, id);
 }
 
 
@@ -1166,17 +1360,23 @@ void Child::session_response(Server::Id id, Session_response response)
 					caps_from_service.acknowledge();
 				}
 
-				/*
-				 * The parent reported the session as closed, so the parent's
-				 * ID space does not hold it anymore either.
-				 */
-				if (session.id_at_parent.constructed())
-					session.id_at_parent.destruct();
+			/*
+			 * The parent reported the session as closed, so the parent's
+			 * ID space does not hold it anymore either.
+			 */
+			if (session.id_at_parent.constructed())
+				session.id_at_parent.destruct();
+
+			{
+				Parent::Client::Id const id = session.id_at_client_if_valid();
 
 				_clear_pending_op(&session);
 
 				session.destroy();
 				_policy.session_state_changed();
+
+				resume_parked_create(this, id);
+			}
 			}
 			break;
 
@@ -1461,6 +1661,14 @@ static Parent::Client::Id any_cpu_session_id(Id_space<Parent::Client> const &id_
 
 void Child::close_all_sessions()
 {
+	/*
+	 * A parked create is completed only while the child is alive to
+	 * receive the answer. The child is going away: drop the parked
+	 * requests before the teardown destroys the session states (which
+	 * would otherwise re-drive them).
+	 */
+	drop_parked_creates(this);
+
 	/*
 	 * Destroy CPU sessions prior to other session types to avoid page-fault
 	 * warnings generated by threads that are losing their PD while still
